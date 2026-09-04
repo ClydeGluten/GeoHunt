@@ -249,7 +249,9 @@ export class GameStore {
         }
         await transaction`delete from accounts where id=${session.accountId}`;
         return {
-          matchIds: matches.filter((match) => match.hosted).map((match) => match.id),
+          matchIds: matches
+            .filter((match) => match.hosted)
+            .map((match) => match.id),
           participantIds: participantIds.map((participant) => participant.id),
         };
       }

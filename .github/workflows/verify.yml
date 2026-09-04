@@ -39,6 +39,20 @@ jobs:
           node-version: 24
           cache: pnpm
       - run: pnpm install --frozen-lockfile
+      - name: Create roles required by migrations
+        run: |
+          psql "$DATABASE_URL" --set=ON_ERROR_STOP=1 <<'SQL'
+          DO $$
+          BEGIN
+            IF NOT EXISTS (SELECT FROM pg_roles WHERE rolname = 'geohunter_app') THEN
+              CREATE ROLE geohunter_app NOLOGIN;
+            END IF;
+            IF NOT EXISTS (SELECT FROM pg_roles WHERE rolname = 'geohunter_mcp') THEN
+              CREATE ROLE geohunter_mcp NOLOGIN;
+            END IF;
+          END
+          $$;
+          SQL
       - run: pnpm --filter @geohunter/db migrate
       - run: pnpm test
       - run: pnpm test:integration

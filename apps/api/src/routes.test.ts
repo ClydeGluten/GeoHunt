@@ -334,14 +334,16 @@ describe("browser host authorization", () => {
 
   it("purges deleted matches, viewers, and targets from location caches", async () => {
     const redis = {
-      scan: vi.fn().mockResolvedValue([
-        "0",
-        [
-          "revealed:hosted:viewer",
-          "revealed:other:deleted-player",
-          "revealed:other:another-viewer",
-        ],
-      ]),
+      scan: vi
+        .fn()
+        .mockResolvedValue([
+          "0",
+          [
+            "revealed:hosted:viewer",
+            "revealed:other:deleted-player",
+            "revealed:other:another-viewer",
+          ],
+        ]),
       del: vi.fn().mockResolvedValue(1),
       hdel: vi.fn().mockResolvedValue(1),
     } as unknown as Redis;

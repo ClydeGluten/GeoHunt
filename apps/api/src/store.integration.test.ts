@@ -499,7 +499,8 @@ describe.skipIf(!databaseUrl)("GameStore integrity", () => {
 
   it("rolls back replay publication when its audit event cannot be written", async () => {
     const { accountId, matchId } = await seedActiveMatch();
-    await connection!.sql`update matches set state='FINISHED', finished_at=now() where id=${matchId}`;
+    await connection!
+      .sql`update matches set state='FINISHED', finished_at=now() where id=${matchId}`;
     const failingStore = storeRejectingSql("insert into game_events");
 
     await expect(
@@ -522,7 +523,8 @@ describe.skipIf(!databaseUrl)("GameStore integrity", () => {
 
   it("caps replay frames returned by one request", async () => {
     const { matchId, hiderId } = await seedActiveMatch();
-    await connection!.sql`update matches set state='FINISHED', finished_at=now() where id=${matchId}`;
+    await connection!
+      .sql`update matches set state='FINISHED', finished_at=now() where id=${matchId}`;
     await connection!.sql`
       insert into location_samples (
         match_id, participant_id, point, recorded_at, accuracy_meters,

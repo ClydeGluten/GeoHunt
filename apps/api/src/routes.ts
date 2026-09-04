@@ -19,11 +19,7 @@ import {
   verifyTelegramChatProof,
 } from "./security.js";
 import { buildSnapshot } from "./snapshot.js";
-import type {
-  DeletionScope,
-  GameStore,
-  SessionContext,
-} from "./store.js";
+import type { DeletionScope, GameStore, SessionContext } from "./store.js";
 
 const IdParameters = z.object({ id: z.uuid() });
 const RoleParameters = z.object({ id: z.uuid(), participantId: z.uuid() });
