@@ -1,0 +1,13 @@
+{
+  "name": "GeoHunter Zone",
+  "short_name": "GeoHunter",
+  "description": "Server-authoritative outdoor hide and seek",
+  "start_url": "/",
+  "display": "standalone",
+  "orientation": "any",
+  "background_color": "#071813",
+  "theme_color": "#071813",
+  "icons": [
+    { "src": "/icon.svg", "sizes": "any", "type": "image/svg+xml", "purpose": "any maskable" }
+  ]
+}

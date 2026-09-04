@@ -1,0 +1,61 @@
+name: geohunter
+
+services:
+  app:
+    container_name: geohunter
+    build:
+      context: .
+      target: all-in-one
+      args:
+        VITE_MAP_STYLE_URL: ${MAP_STYLE_URL:-https://tiles.openfreemap.org/styles/liberty}
+    restart: unless-stopped
+    init: true
+    environment:
+      NODE_ENV: ${NODE_ENV:-production}
+      LOG_LEVEL: ${LOG_LEVEL:-info}
+      DEV_AUTH_ENABLED: ${DEV_AUTH_ENABLED:-false}
+      COOKIE_SECURE: ${COOKIE_SECURE:-true}
+      APP_MODE: ${APP_MODE:-all}
+      TUNNEL_MODE: ${TUNNEL_MODE:-quick}
+      CLOUDFLARED_TUNNEL_TOKEN: ${CLOUDFLARED_TUNNEL_TOKEN:-}
+      SITE_ADDRESS: ${SITE_ADDRESS:-:80}
+      PUBLIC_WEBAPP_URL: ${PUBLIC_WEBAPP_URL:-http://localhost}
+      PUBLIC_BASE_URL: ${PUBLIC_BASE_URL:-http://localhost}
+      CORS_ORIGIN: ${CORS_ORIGIN:-http://localhost}
+      BOT_MODE: ${BOT_MODE:-polling}
+      BOT_POLLING_START_DELAY_SECONDS: ${BOT_POLLING_START_DELAY_SECONDS:-35}
+      BOT_TOKEN: ${BOT_TOKEN:?set BOT_TOKEN}
+      BOT_WEBHOOK_SECRET: ${BOT_WEBHOOK_SECRET:?set BOT_WEBHOOK_SECRET}
+      BOT_SERVICE_TOKEN: ${BOT_SERVICE_TOKEN:?set BOT_SERVICE_TOKEN}
+      POSTGRES_DB: ${POSTGRES_DB:-geohunter}
+      POSTGRES_USER: ${POSTGRES_ADMIN_USER:-postgres}
+      POSTGRES_PASSWORD: ${POSTGRES_ADMIN_PASSWORD:?set POSTGRES_ADMIN_PASSWORD}
+      MIGRATOR_DB_PASSWORD: ${MIGRATOR_DB_PASSWORD:?set MIGRATOR_DB_PASSWORD}
+      APP_DB_PASSWORD: ${APP_DB_PASSWORD:?set APP_DB_PASSWORD}
+      MCP_DB_PASSWORD: ${MCP_DB_PASSWORD:?set MCP_DB_PASSWORD}
+      REDIS_PASSWORD: ${REDIS_PASSWORD:?set REDIS_PASSWORD}
+    ports:
+      - "80:80"
+      - "443:443"
+      - "443:443/udp"
+      - "127.0.0.1:${POSTGRES_DEV_PORT:-5432}:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+      - redis_data:/var/lib/redis
+      - caddy_data:/var/lib/caddy
+    security_opt:
+      - no-new-privileges:true
+    logging:
+      driver: json-file
+      options: { max-size: "20m", max-file: "3" }
+    deploy:
+      resources:
+        limits: { cpus: "4.00", memory: 2560M }
+
+volumes:
+  postgres_data:
+    name: geohunter_postgres_data
+  redis_data:
+    name: geohunter_redis_data
+  caddy_data:
+    name: geohunter_caddy_data

@@ -1,0 +1,15 @@
+node_modules/
+.pnpm-store/
+dist/
+.turbo/
+.vite/
+coverage/
+.env
+.env.*.local
+playwright-report/
+test-results/
+*.log
+backups/*.sql
+backups/*.dump
+.DS_Store
+Thumbs.db
