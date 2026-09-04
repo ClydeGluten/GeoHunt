@@ -17,7 +17,10 @@ interface TelegramLocationManager {
 
 interface TelegramWebApp {
   initData: string;
-  initDataUnsafe?: { start_param?: string; user?: { id: number; first_name: string } };
+  initDataUnsafe?: {
+    start_param?: string;
+    user?: { id: number; first_name: string };
+  };
   platform: string;
   colorScheme: "light" | "dark";
   ready(): void;
@@ -25,7 +28,10 @@ interface TelegramWebApp {
   requestFullscreen?: () => void;
   enableClosingConfirmation(): void;
   openTelegramLink(url: string): void;
-  HapticFeedback?: { impactOccurred(style: "light" | "medium" | "heavy"): void; notificationOccurred(type: "error" | "success" | "warning"): void };
+  HapticFeedback?: {
+    impactOccurred(style: "light" | "medium" | "heavy"): void;
+    notificationOccurred(type: "error" | "success" | "warning"): void;
+  };
   LocationManager?: TelegramLocationManager;
 }
 
@@ -48,7 +54,8 @@ export function initializeTelegram() {
 export async function requestTelegramLocation(): Promise<TelegramLocationData | null> {
   const manager = telegram()?.LocationManager;
   if (!manager) return null;
-  if (!manager.isInited) await new Promise<void>((resolve) => manager.init(resolve));
+  if (!manager.isInited)
+    await new Promise<void>((resolve) => manager.init(resolve));
   if (!manager.isLocationAvailable) return null;
   return new Promise((resolve) => manager.getLocation(resolve));
 }

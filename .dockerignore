@@ -1,5 +1,6 @@
 .git
 .github
+.agents
 node_modules
 **/node_modules
 **/dist
@@ -7,4 +8,6 @@ node_modules
 coverage
 backups
 .env
+.env.*
+!.env.example
 *.log

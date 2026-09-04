@@ -11,7 +11,12 @@ export const MatchStateSchema = z.enum([
 ]);
 export type MatchState = z.infer<typeof MatchStateSchema>;
 
-export const PlayerRoleSchema = z.enum(["HOST", "HIDER", "SEEKER", "SPECTATOR"]);
+export const PlayerRoleSchema = z.enum([
+  "HOST",
+  "HIDER",
+  "SEEKER",
+  "SPECTATOR",
+]);
 export type PlayerRole = z.infer<typeof PlayerRoleSchema>;
 
 export const VisibilityModeSchema = z.enum(["NEVER", "ALWAYS", "PULSE"]);
@@ -43,12 +48,45 @@ export const LocationUpdateSchema = PositionSchema.extend({
 });
 export type LocationUpdate = z.infer<typeof LocationUpdateSchema>;
 
+const CoordinateSchema = z.tuple([
+  z.number().gte(-180).lte(180),
+  z.number().gte(-90).lte(90),
+]);
+
+const LinearRingSchema = z
+  .array(CoordinateSchema)
+  .min(4)
+  .max(128)
+  .refine((ring) => {
+    const first = ring[0];
+    const last = ring.at(-1);
+    return Boolean(
+      first && last && first[0] === last[0] && first[1] === last[1],
+    );
+  }, "Polygon ring must be closed")
+  .refine(
+    (ring) =>
+      new Set(
+        ring
+          .slice(0, -1)
+          .map(([longitude, latitude]) => `${longitude},${latitude}`),
+      ).size >= 3,
+    "Polygon needs at least three distinct vertices",
+  )
+  .refine((ring) => {
+    let twiceArea = 0;
+    for (let index = 0; index < ring.length - 1; index += 1) {
+      const current = ring[index];
+      const next = ring[index + 1];
+      if (current && next)
+        twiceArea += current[0] * next[1] - next[0] * current[1];
+    }
+    return Math.abs(twiceArea) > Number.EPSILON;
+  }, "Polygon vertices must enclose an area");
+
 export const PolygonSchema = z.object({
   type: z.literal("Polygon"),
-  coordinates: z
-    .array(z.array(z.tuple([z.number().gte(-180).lte(180), z.number().gte(-90).lte(90)])))
-    .min(1)
-    .refine((rings) => (rings[0]?.length ?? 0) >= 4, "Polygon needs at least three vertices plus closing point"),
+  coordinates: z.array(LinearRingSchema).length(1),
 });
 export type PlayzonePolygon = z.infer<typeof PolygonSchema>;
 
@@ -63,7 +101,10 @@ export const VisibilityRuleSchema = z
     persistLastSeen: z.boolean().default(true),
   })
   .superRefine((rule, context) => {
-    if (rule.mode === "PULSE" && rule.visibleDurationSeconds >= rule.cyclePeriodSeconds) {
+    if (
+      rule.mode === "PULSE" &&
+      rule.visibleDurationSeconds >= rule.cyclePeriodSeconds
+    ) {
       context.addIssue({
         code: "custom",
         path: ["visibleDurationSeconds"],
@@ -96,13 +137,43 @@ export const MatchSettingsSchema = z
   });
 export type MatchSettings = z.infer<typeof MatchSettingsSchema>;
 
-export const CreateMatchSchema = z.object({
-  name: z.string().trim().min(2).max(80),
-  telegramChatId: z.string().regex(/^-?\d+$/).nullable().optional(),
-  playzone: PolygonSchema,
-  settings: MatchSettingsSchema,
-  visibilityRules: z.array(VisibilityRuleSchema).max(16),
-});
+export const CreateMatchSchema = z
+  .object({
+    name: z.string().trim().min(2).max(80),
+    telegramChatId: z
+      .string()
+      .regex(/^-?\d+$/)
+      .nullable()
+      .optional(),
+    telegramUserId: z.string().regex(/^\d+$/).optional(),
+    telegramChatProofIssuedAt: z.number().int().positive().optional(),
+    telegramChatProof: z
+      .string()
+      .regex(/^[a-f0-9]{64}$/i)
+      .optional(),
+    playzone: PolygonSchema,
+    settings: MatchSettingsSchema,
+    visibilityRules: z.array(VisibilityRuleSchema).max(16),
+    consentLocation: z.literal(true),
+    consentReplay: z.literal(true),
+  })
+  .superRefine((value, context) => {
+    const grantFields = [
+      value.telegramChatId,
+      value.telegramUserId,
+      value.telegramChatProofIssuedAt,
+      value.telegramChatProof,
+    ];
+    const supplied = grantFields.filter(
+      (field) => field !== undefined && field !== null,
+    ).length;
+    if (supplied > 0 && supplied < grantFields.length) {
+      context.addIssue({
+        code: "custom",
+        message: "The complete Telegram chat grant is required",
+      });
+    }
+  });
 export type CreateMatchInput = z.infer<typeof CreateMatchSchema>;
 
 export const UpdateMatchSchema = z.object({
@@ -126,15 +197,33 @@ export const JoinMatchSchema = z.object({
   consentReplay: z.literal(true),
 });
 
-export const TelegramAuthSchema = z.object({ initData: z.string().min(20).max(16_384) });
+export const TelegramAuthSchema = z.object({
+  initData: z.string().min(20).max(16_384),
+});
+export const WebAuthSchema = z.object({
+  displayName: z.string().trim().min(2).max(40),
+});
 
 export const MatchActionSchema = z.object({
-  action: z.enum(["OPEN_LOBBY", "START", "PAUSE", "RESUME", "END", "CANCEL", "EMERGENCY_REVEAL_ON", "EMERGENCY_REVEAL_OFF"]),
+  action: z.enum([
+    "OPEN_LOBBY",
+    "START",
+    "PAUSE",
+    "RESUME",
+    "END",
+    "CANCEL",
+    "EMERGENCY_REVEAL_ON",
+    "EMERGENCY_REVEAL_OFF",
+  ]),
 });
 export type MatchAction = z.infer<typeof MatchActionSchema>["action"];
 
-export const AssignRoleSchema = z.object({ role: PlayerRoleSchema.exclude(["HOST"]) });
-export const ModerationActionSchema = z.object({ action: z.enum(["SPECTATE", "DISQUALIFY", "REMOVE"]) });
+export const AssignRoleSchema = z.object({
+  role: PlayerRoleSchema.exclude(["HOST"]),
+});
+export const ModerationActionSchema = z.object({
+  action: z.enum(["SPECTATE", "DISQUALIFY", "REMOVE"]),
+});
 
 export const TagAttemptSchema = z.object({
   matchId: z.uuid(),
@@ -171,6 +260,8 @@ export interface MatchSnapshot {
   participants: PublicParticipant[];
   visiblePositions: VisiblePosition[];
   phaseEndsAt: string | null;
+  pausedAt: string | null;
+  winnerRole: "HIDER" | "SEEKER" | null;
   emergencyReveal: boolean;
 }
 
@@ -195,18 +286,39 @@ export interface ReplayFrame {
 
 export interface ServerToClientEvents {
   "match:snapshot": (snapshot: MatchSnapshot) => void;
-  "phase:changed": (payload: { state: MatchState; phaseEndsAt: string | null }) => void;
+  "phase:changed": (payload: {
+    state: MatchState;
+    phaseEndsAt: string | null;
+  }) => void;
   "visibility:update": (payload: { positions: VisiblePosition[] }) => void;
-  "participant:tagged": (payload: { participantId: string; newRole: PlayerRole }) => void;
-  "boundary:update": (payload: { participantId: string; outside: boolean; graceEndsAt: string | null }) => void;
-  "presence:update": (payload: { participantId: string; connected: boolean }) => void;
-  "match:finished": (payload: { winnerRole: "HIDER" | "SEEKER" | null }) => void;
+  "participant:tagged": (payload: {
+    participantId: string;
+    newRole: PlayerRole;
+  }) => void;
+  "boundary:update": (payload: {
+    participantId: string;
+    outside: boolean;
+    graceEndsAt: string | null;
+  }) => void;
+  "presence:update": (payload: {
+    participantId: string;
+    connected: boolean;
+  }) => void;
+  "match:finished": (payload: {
+    winnerRole: "HIDER" | "SEEKER" | null;
+  }) => void;
   "game:error": (payload: { code: string; message: string }) => void;
 }
 
 export interface ClientToServerEvents {
-  "location:update": (payload: LocationUpdate, acknowledge?: (result: { accepted: boolean; reason?: string }) => void) => void;
+  "location:update": (
+    payload: LocationUpdate,
+    acknowledge?: (result: { accepted: boolean; reason?: string }) => void,
+  ) => void;
   "location:status": (payload: { matchId: string; status: "DENIED" }) => void;
-  "tag:attempt": (payload: TagAttempt, acknowledge?: (result: { accepted: boolean; reason?: string }) => void) => void;
+  "tag:attempt": (
+    payload: TagAttempt,
+    acknowledge?: (result: { accepted: boolean; reason?: string }) => void,
+  ) => void;
   "presence:heartbeat": (payload: { matchId: string }) => void;
 }

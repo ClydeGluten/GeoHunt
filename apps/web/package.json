@@ -3,7 +3,9 @@
   "version": "0.1.0",
   "private": true,
   "type": "module",
-  "files": ["dist"],
+  "files": [
+    "dist"
+  ],
   "scripts": {
     "build": "tsc -b && vite build",
     "dev": "vite --host 0.0.0.0",
@@ -14,6 +16,7 @@
   },
   "dependencies": {
     "@geohunter/contracts": "workspace:*",
+    "@geohunter/game-engine": "workspace:*",
     "maplibre-gl": "^5.7.1",
     "qrcode": "^1.5.4",
     "react": "^19.1.1",

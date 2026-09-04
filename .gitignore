@@ -3,8 +3,10 @@ node_modules/
 dist/
 .turbo/
 .vite/
+*.tsbuildinfo
 coverage/
 .env
+.env.judge
 .env.*.local
 playwright-report/
 test-results/

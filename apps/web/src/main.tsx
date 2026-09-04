@@ -3,7 +3,11 @@ import { createRoot } from "react-dom/client";
 import App from "./App";
 import "./styles.css";
 
-createRoot(document.getElementById("root")!).render(<StrictMode><App /></StrictMode>);
+createRoot(document.getElementById("root")!).render(
+  <StrictMode>
+    <App />
+  </StrictMode>,
+);
 
 if ("serviceWorker" in navigator && import.meta.env.PROD) {
   const hadController = Boolean(navigator.serviceWorker.controller);
@@ -14,5 +18,7 @@ if ("serviceWorker" in navigator && import.meta.env.PROD) {
       location.reload();
     }
   });
-  void navigator.serviceWorker.register("/sw.js", { updateViaCache: "none" }).then((registration) => registration.update());
+  void navigator.serviceWorker
+    .register("/sw.js", { updateViaCache: "none" })
+    .then((registration) => registration.update());
 }

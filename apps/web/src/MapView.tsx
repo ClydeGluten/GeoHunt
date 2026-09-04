@@ -7,6 +7,7 @@ import maplibregl, {
 } from "maplibre-gl";
 import "maplibre-gl/dist/maplibre-gl.css";
 import { useEffect, useRef } from "react";
+import { boundsForCoordinates } from "./map-bounds";
 
 interface MapViewProps {
   polygon: PlayzonePolygon | null;
@@ -45,6 +46,7 @@ export function MapView({
   const map = useRef<MapLibreMap | null>(null);
   const vertexMarkers = useRef<Marker[]>([]);
   const ready = useRef(false);
+  const hasFittedInitialView = useRef(false);
   const polygonRef = useRef(polygon);
   const callbackRef = useRef(onPolygonChange);
   polygonRef.current = polygon;
@@ -194,6 +196,17 @@ export function MapView({
           ? { type: "Feature", properties: {}, geometry: polygon }
           : emptyCollection(),
       );
+      if (!editable && !hasFittedInitialView.current && polygon) {
+        const bounds = boundsForCoordinates(polygon.coordinates.flat());
+        if (bounds) {
+          instance.fitBounds(bounds, {
+            padding: 48,
+            maxZoom: 16,
+            duration: 0,
+          });
+          hasFittedInitialView.current = true;
+        }
+      }
     };
     if (ready.current) update();
     else instance.once("load", update);

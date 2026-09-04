@@ -2,10 +2,14 @@ import postgres from "postgres";
 import { afterAll, describe, expect, it } from "vitest";
 
 const databaseUrl = process.env.TEST_DATABASE_URL;
-const sql = databaseUrl ? postgres(databaseUrl, { max: 1, prepare: false }) : null;
+const sql = databaseUrl
+  ? postgres(databaseUrl, { max: 1, prepare: false })
+  : null;
 
 describe.skipIf(!databaseUrl)("PostGIS game predicates", () => {
-  afterAll(async () => { await sql?.end(); });
+  afterAll(async () => {
+    await sql?.end();
+  });
 
   it("treats a polygon edge as inside and an exterior point as outside", async () => {
     const [result] = await sql!<{ edge: boolean; outside: boolean }[]>`

@@ -1,4 +1,9 @@
-import { createHash, createHmac, randomBytes, timingSafeEqual } from "node:crypto";
+import {
+  createHash,
+  createHmac,
+  randomBytes,
+  timingSafeEqual,
+} from "node:crypto";
 
 export interface TelegramUserData {
   id: number;
@@ -16,40 +21,82 @@ export function newOpaqueToken(bytes = 32): string {
   return randomBytes(bytes).toString("base64url");
 }
 
-export function validateTelegramInitData(initData: string, botToken: string, maxAgeSeconds: number, now = new Date()): TelegramUserData {
+export function verifyTelegramChatProof(
+  chatId: string,
+  telegramUserId: string,
+  issuedAt: number,
+  proof: string,
+  serviceToken: string,
+  maxAgeSeconds: number,
+  now = new Date(),
+): boolean {
+  if (!Number.isSafeInteger(issuedAt) || !/^[a-f0-9]{64}$/i.test(proof))
+    return false;
+  const ageSeconds = Math.floor(now.getTime() / 1000) - issuedAt;
+  if (ageSeconds < -30 || ageSeconds > maxAgeSeconds) return false;
+  const expected = createHmac("sha256", serviceToken)
+    .update(`${chatId}\n${telegramUserId}\n${issuedAt}`)
+    .digest();
+  const received = Buffer.from(proof, "hex");
+  return (
+    received.length === expected.length && timingSafeEqual(received, expected)
+  );
+}
+
+export function validateTelegramInitData(
+  initData: string,
+  botToken: string,
+  maxAgeSeconds: number,
+  now = new Date(),
+): TelegramUserData {
   const parameters = new URLSearchParams(initData);
   const receivedHash = parameters.get("hash");
-  if (!receivedHash || !/^[a-f0-9]{64}$/i.test(receivedHash)) throw new Error("Telegram hash missing or malformed");
+  if (!receivedHash || !/^[a-f0-9]{64}$/i.test(receivedHash))
+    throw new Error("Telegram hash missing or malformed");
   parameters.delete("hash");
 
   const dataCheckString = [...parameters.entries()]
     .sort(([first], [second]) => first.localeCompare(second))
     .map(([key, value]) => `${key}=${value}`)
     .join("\n");
-  const secretKey = createHmac("sha256", "WebAppData").update(botToken).digest();
-  const calculated = createHmac("sha256", secretKey).update(dataCheckString).digest();
+  const secretKey = createHmac("sha256", "WebAppData")
+    .update(botToken)
+    .digest();
+  const calculated = createHmac("sha256", secretKey)
+    .update(dataCheckString)
+    .digest();
   const received = Buffer.from(receivedHash, "hex");
-  if (received.length !== calculated.length || !timingSafeEqual(received, calculated)) throw new Error("Telegram signature invalid");
+  if (
+    received.length !== calculated.length ||
+    !timingSafeEqual(received, calculated)
+  )
+    throw new Error("Telegram signature invalid");
 
   const authDate = Number(parameters.get("auth_date"));
   if (!Number.isFinite(authDate)) throw new Error("Telegram auth_date missing");
   const ageSeconds = Math.floor(now.getTime() / 1000) - authDate;
-  if (ageSeconds < -30 || ageSeconds > maxAgeSeconds) throw new Error("Telegram authentication expired");
+  if (ageSeconds < -30 || ageSeconds > maxAgeSeconds)
+    throw new Error("Telegram authentication expired");
 
   const rawUser = parameters.get("user");
   if (!rawUser) throw new Error("Telegram user missing");
   const user = JSON.parse(rawUser) as TelegramUserData;
-  if (!Number.isSafeInteger(user.id) || !user.first_name) throw new Error("Telegram user malformed");
+  if (!Number.isSafeInteger(user.id) || !user.first_name)
+    throw new Error("Telegram user malformed");
   return user;
 }
 
-export function parseCookieHeader(header: string | undefined, name: string): string | null {
+export function parseCookieHeader(
+  header: string | undefined,
+  name: string,
+): string | null {
   if (!header) return null;
   for (const item of header.split(";")) {
     const separator = item.indexOf("=");
     if (separator < 0) continue;
     const key = item.slice(0, separator).trim();
-    if (key === name) return decodeURIComponent(item.slice(separator + 1).trim());
+    if (key === name)
+      return decodeURIComponent(item.slice(separator + 1).trim());
   }
   return null;
 }

@@ -1,5 +1,7 @@
 import { useEffect, useMemo, useState } from "react";
 import { ApiFailure, api, post } from "./api";
+import { hasAccountIdentity, shouldOfferBrowserLogin } from "./auth";
+import { BrowserLogin } from "./BrowserLogin";
 import { CreateScreen } from "./screens/CreateScreen";
 import { Dashboard } from "./screens/Dashboard";
 import { GameScreen } from "./screens/GameScreen";
@@ -110,12 +112,9 @@ export default function App() {
           Draw the arena. Pick the hunters. Make every street part of the chase.
         </p>
         {error && <p className="error-banner">{error}</p>}
-        {(import.meta.env.DEV ||
-          ["localhost", "127.0.0.1"].includes(location.hostname)) && (
-          <DevLogin onReady={refreshAuth} />
-        )}
+        <BrowserLogin onReady={refreshAuth} />
         <p className="fine-print">
-          Hosts sign in through Telegram. Guests enter from an invite link.
+          Continue in any browser, or open GeoHunter in Telegram.
         </p>
       </main>
     );
@@ -124,11 +123,22 @@ export default function App() {
   if (inviteCode && route.page === "home")
     return (
       <JoinScreen
-        authenticated={auth.kind === "TELEGRAM"}
-        existingGuest={auth.kind === "GUEST"}
+        authenticated={hasAccountIdentity(auth)}
         inviteCode={inviteCode}
         onJoined={(id) => navigate({ page: "game", id })}
       />
+    );
+
+  if (shouldOfferBrowserLogin(auth, route.page))
+    return (
+      <main className="welcome center">
+        <div className="brand-mark">G</div>
+        <p className="eyebrow">LIVE LOCATION GAME</p>
+        <h1>Start your own hunt</h1>
+        <p className="lede">Choose a trail name to create and host games.</p>
+        {error && <p className="error-banner">{error}</p>}
+        <BrowserLogin onReady={refreshAuth} />
+      </main>
     );
 
   if (route.page === "create")
@@ -161,34 +171,5 @@ export default function App() {
       onOpen={(id) => navigate({ page: "game", id })}
       onJoined={(id) => navigate({ page: "game", id })}
     />
-  );
-}
-
-function DevLogin({ onReady }: { onReady: () => Promise<void> }) {
-  const [name, setName] = useState("Trail Master");
-  const [busy, setBusy] = useState(false);
-  return (
-    <form
-      className="card compact"
-      onSubmit={(event) => {
-        event.preventDefault();
-        setBusy(true);
-        void post("/v1/auth/dev", { displayName: name })
-          .then(onReady)
-          .finally(() => setBusy(false));
-      }}
-    >
-      <label>
-        Local development host
-        <input
-          value={name}
-          onChange={(event) => setName(event.target.value)}
-          minLength={2}
-        />
-      </label>
-      <button className="primary" disabled={busy}>
-        {busy ? "Opening…" : "Enter local demo"}
-      </button>
-    </form>
   );
 }

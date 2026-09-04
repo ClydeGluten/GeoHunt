@@ -11,17 +11,30 @@ import type {
   UpdateMatchInput,
   VisibilityRule,
 } from "@geohunter/contracts";
-import { MatchSettingsSchema, PolygonSchema, VisibilityRuleSchema } from "@geohunter/contracts";
-import type { DatabaseConnection } from "@geohunter/db";
+import {
+  MatchSettingsSchema,
+  PolygonSchema,
+  VisibilityRuleSchema,
+} from "@geohunter/contracts";
+import type { DatabaseConnection, DatabaseTransaction } from "@geohunter/db";
 import { assertTransition } from "@geohunter/game-engine";
-import { hashToken, newOpaqueToken, type TelegramUserData } from "./security.js";
+import {
+  hashToken,
+  newOpaqueToken,
+  type TelegramUserData,
+} from "./security.js";
 
 export interface SessionContext {
   id: string;
-  kind: "TELEGRAM" | "GUEST";
+  kind: "TELEGRAM" | "WEB" | "GUEST";
   accountId: string | null;
   participantId: string | null;
   expiresAt: Date;
+}
+
+export interface DeletionScope {
+  matchIds: string[];
+  participantIds: string[];
 }
 
 export interface ViewerContext {
@@ -33,7 +46,10 @@ export interface ViewerContext {
 }
 
 export function viewerVisibilityRole(viewer: ViewerContext): PlayerRole {
-  return viewer.isHost && (viewer.role === "SPECTATOR" || viewer.role === "HOST") ? "HOST" : viewer.role;
+  return viewer.isHost &&
+    (viewer.role === "SPECTATOR" || viewer.role === "HOST")
+    ? "HOST"
+    : viewer.role;
 }
 
 export interface MatchRecord {
@@ -83,6 +99,33 @@ interface BoundaryResult {
   disqualified: boolean;
 }
 
+async function finishIfNoActiveHiders(
+  sql: DatabaseTransaction,
+  matchId: string,
+): Promise<boolean> {
+  const [finished] = await sql`
+    update matches m
+    set state='FINISHED', winner_role='SEEKER', finished_at=now(),
+      phase_ends_at=now(), emergency_reveal=false
+    where m.id=${matchId} and m.state in ('HIDING', 'ACTIVE', 'PAUSED')
+      and not exists (
+        select 1 from participants p
+        where p.match_id=m.id and p.role='HIDER' and p.status='ACTIVE'
+      )
+      and exists (
+        select 1 from participants p
+        where p.match_id=m.id and p.role='SEEKER' and p.status='ACTIVE'
+      )
+    returning m.id
+  `;
+  if (!finished) return false;
+  await sql`
+    insert into game_events (match_id, type, payload)
+    values (${matchId}, 'MATCH_FINISHED', '{"winnerRole":"SEEKER"}'::jsonb)
+  `;
+  return true;
+}
+
 function settingsFromRow(row: Record<string, unknown>): MatchSettings {
   return MatchSettingsSchema.parse({
     durationSeconds: row.durationSeconds,
@@ -104,7 +147,8 @@ function settingsFromRow(row: Record<string, unknown>): MatchSettings {
 
 function jsonPayload(value: unknown): string {
   const payload = JSON.stringify(value);
-  if (payload === undefined) throw new Error("Game event payload is not JSON serializable");
+  if (payload === undefined)
+    throw new Error("Game event payload is not JSON serializable");
   return payload;
 }
 
@@ -124,8 +168,12 @@ export class GameStore {
     return account ?? null;
   }
 
-  async upsertTelegramAccount(user: TelegramUserData): Promise<{ id: string; displayName: string }> {
-    const [account] = await this.connection.sql<{ id: string; displayName: string }[]>`
+  async upsertTelegramAccount(
+    user: TelegramUserData,
+  ): Promise<{ id: string; displayName: string }> {
+    const [account] = await this.connection.sql<
+      { id: string; displayName: string }[]
+    >`
       insert into accounts (telegram_user_id, username, first_name, last_name, photo_url)
       values (${String(user.id)}, ${user.username ?? null}, ${user.first_name}, ${user.last_name ?? null}, ${user.photo_url ?? null})
       on conflict (telegram_user_id) do update set
@@ -140,18 +188,142 @@ export class GameStore {
     return account;
   }
 
-  async createDevAccount(displayName: string): Promise<{ id: string; displayName: string }> {
-    const syntheticId = -(Date.now() * 1000 + Math.floor(Math.random() * 1000));
-    return this.upsertTelegramAccount({ id: syntheticId, first_name: displayName });
+  async createWebAccount(
+    displayName: string,
+  ): Promise<{ id: string; displayName: string }> {
+    const [account] = await this.connection.sql<
+      { id: string; displayName: string }[]
+    >`
+      insert into accounts (first_name) values (${displayName})
+      returning id, first_name as "displayName"
+    `;
+    if (!account) throw new Error("Browser account creation failed");
+    return account;
   }
 
-  async createSession(input: { kind: "TELEGRAM" | "GUEST"; accountId?: string; participantId?: string; days: number }) {
+  async createDevAccount(
+    displayName: string,
+  ): Promise<{ id: string; displayName: string }> {
+    const syntheticId = -(Date.now() * 1000 + Math.floor(Math.random() * 1000));
+    return this.upsertTelegramAccount({
+      id: syntheticId,
+      first_name: displayName,
+    });
+  }
+
+  async deleteIdentity(session: SessionContext): Promise<DeletionScope> {
+    return this.connection.sql.begin(async (transaction) => {
+      const empty: DeletionScope = { matchIds: [], participantIds: [] };
+      const [current] = await transaction`
+        select id from auth_sessions where id=${session.id} for update
+      `;
+      if (!current) return empty;
+
+      if (session.accountId) {
+        const matches = await transaction<{ id: string; hosted: boolean }[]>`
+          select distinct m.id, (m.host_account_id=${session.accountId}) as hosted
+          from matches m
+          left join participants p on p.match_id=m.id and p.account_id=${session.accountId}
+          where m.host_account_id=${session.accountId} or p.id is not null
+        `;
+        const participantIds = await transaction<{ id: string }[]>`
+          select id from participants where account_id=${session.accountId}
+        `;
+        for (const match of [...matches].sort((a, b) =>
+          a.id.localeCompare(b.id),
+        )) {
+          await transaction`select id from matches where id=${match.id} for update`;
+        }
+        await transaction`delete from matches where host_account_id=${session.accountId}`;
+        const removed = await transaction<{ matchId: string }[]>`
+          delete from participants where account_id=${session.accountId}
+          returning match_id as "matchId"
+        `;
+        for (const match of matches) {
+          if (
+            !match.hosted &&
+            removed.some((participant) => participant.matchId === match.id)
+          ) {
+            await finishIfNoActiveHiders(transaction, match.id);
+          }
+        }
+        await transaction`delete from accounts where id=${session.accountId}`;
+        return {
+          matchIds: matches.filter((match) => match.hosted).map((match) => match.id),
+          participantIds: participantIds.map((participant) => participant.id),
+        };
+      }
+
+      if (session.participantId) {
+        const [participant] = await transaction<{ matchId: string }[]>`
+          select match_id as "matchId" from participants
+          where id=${session.participantId}
+        `;
+        if (participant) {
+          await transaction`select id from matches where id=${participant.matchId} for update`;
+          await transaction`delete from participants where id=${session.participantId}`;
+          await finishIfNoActiveHiders(transaction, participant.matchId);
+        } else {
+          await transaction`delete from auth_sessions where id=${session.id}`;
+        }
+        return { matchIds: [], participantIds: [session.participantId] };
+      }
+
+      return empty;
+    });
+  }
+
+  async createSession(
+    input: {
+      kind: "TELEGRAM" | "WEB" | "GUEST";
+      accountId?: string;
+      participantId?: string;
+      days: number;
+    },
+    previous?: { id: string; token: string },
+  ) {
     const token = newOpaqueToken();
     const expiresAt = new Date(Date.now() + input.days * 86_400_000);
-    await this.connection.sql`
-      insert into auth_sessions (token_hash, kind, account_id, participant_id, expires_at)
-      values (${hashToken(token)}, ${input.kind}, ${input.accountId ?? null}, ${input.participantId ?? null}, ${expiresAt.toISOString()})
-    `;
+    await this.connection.sql.begin(async (transaction) => {
+      if (previous) {
+        const [current] = await transaction<
+          {
+            kind: "TELEGRAM" | "WEB" | "GUEST";
+            participantId: string | null;
+            matchId: string | null;
+          }[]
+        >`
+          select s.kind, s.participant_id as "participantId", p.match_id as "matchId"
+          from auth_sessions s
+          left join participants p on p.id=s.participant_id
+          where s.id=${previous.id} and s.token_hash=${hashToken(previous.token)}
+          for update of s
+        `;
+        if (!current) throw new Error("Previous session was already replaced");
+        if (
+          current.kind === "GUEST" &&
+          current.participantId &&
+          current.matchId
+        ) {
+          await transaction`
+            select id from matches where id=${current.matchId} for update
+          `;
+          await transaction`
+            update participants set status='LEFT', left_at=now()
+            where id=${current.participantId} and status <> 'LEFT'
+          `;
+          await finishIfNoActiveHiders(transaction, current.matchId);
+        }
+        await transaction`
+          delete from auth_sessions
+          where id=${previous.id} and token_hash=${hashToken(previous.token)}
+        `;
+      }
+      await transaction`
+        insert into auth_sessions (token_hash, kind, account_id, participant_id, expires_at)
+        values (${hashToken(token)}, ${input.kind}, ${input.accountId ?? null}, ${input.participantId ?? null}, ${expiresAt.toISOString()})
+      `;
+    });
     return { token, expiresAt };
   }
 
@@ -165,11 +337,77 @@ export class GameStore {
   }
 
   async revokeSession(token: string): Promise<void> {
-    await this.connection.sql`delete from auth_sessions where token_hash = ${hashToken(token)}`;
+    await this.connection.sql.begin(async (transaction) => {
+      const [session] = await transaction<
+        {
+          kind: SessionContext["kind"];
+          participantId: string | null;
+          matchId: string | null;
+        }[]
+      >`
+        select s.kind, s.participant_id as "participantId", p.match_id as "matchId"
+        from auth_sessions s
+        left join participants p on p.id=s.participant_id
+        where s.token_hash=${hashToken(token)}
+        for update of s
+      `;
+      if (!session) return;
+      if (
+        session.kind === "GUEST" &&
+        session.participantId &&
+        session.matchId
+      ) {
+        await transaction`select id from matches where id=${session.matchId} for update`;
+        await transaction`
+          update participants set status='LEFT', left_at=now()
+          where id=${session.participantId} and status <> 'LEFT'
+        `;
+      }
+      await transaction`
+        delete from auth_sessions where token_hash=${hashToken(token)}
+      `;
+      if (session.kind === "GUEST" && session.matchId) {
+        await finishIfNoActiveHiders(transaction, session.matchId);
+      }
+    });
   }
 
-  async findInvite(code: string): Promise<{ matchId: string; state: MatchState } | null> {
-    const [invite] = await this.connection.sql<{ matchId: string; state: MatchState }[]>`
+  async retireGuestIdentity(
+    token: string,
+    participantId: string,
+  ): Promise<void> {
+    await this.connection.sql.begin(async (transaction) => {
+      const [identity] = await transaction<{ matchId: string }[]>`
+        select p.match_id as "matchId"
+        from auth_sessions s
+        join participants p on p.id=s.participant_id
+        join matches m on m.id=p.match_id
+        where s.token_hash=${hashToken(token)} and s.kind='GUEST'
+          and s.participant_id=${participantId}
+        for update of s, m
+      `;
+      if (!identity) return;
+      const [retired] = await transaction`
+        delete from auth_sessions
+        where token_hash=${hashToken(token)} and kind='GUEST'
+          and participant_id=${participantId}
+        returning participant_id
+      `;
+      if (!retired) return;
+      await transaction`
+        update participants set status='LEFT', left_at=now()
+        where id=${participantId} and status <> 'LEFT'
+      `;
+      await finishIfNoActiveHiders(transaction, identity.matchId);
+    });
+  }
+
+  async findInvite(
+    code: string,
+  ): Promise<{ matchId: string; state: MatchState } | null> {
+    const [invite] = await this.connection.sql<
+      { matchId: string; state: MatchState }[]
+    >`
       select i.match_id as "matchId", m.state
       from invitations i join matches m on m.id = i.match_id
       where i.code_hash = ${hashToken(code)}
@@ -179,8 +417,20 @@ export class GameStore {
     return invite ?? null;
   }
 
-  async getInvitePreview(code: string): Promise<{ matchId: string; name: string; state: MatchState; participantCount: number } | null> {
-    const [preview] = await this.connection.sql<{ matchId: string; name: string; state: MatchState; participantCount: number }[]>`
+  async getInvitePreview(code: string): Promise<{
+    matchId: string;
+    name: string;
+    state: MatchState;
+    participantCount: number;
+  } | null> {
+    const [preview] = await this.connection.sql<
+      {
+        matchId: string;
+        name: string;
+        state: MatchState;
+        participantCount: number;
+      }[]
+    >`
       select m.id as "matchId", m.name, m.state, count(p.id)::integer as "participantCount"
       from invitations i join matches m on m.id=i.match_id left join participants p on p.match_id=m.id
       where i.code_hash=${hashToken(code)} and i.revoked_at is null and (i.expires_at is null or i.expires_at>now())
@@ -189,36 +439,160 @@ export class GameStore {
     return preview ?? null;
   }
 
-  async joinGuest(code: string, displayName: string): Promise<{ participantId: string; matchId: string }> {
+  async joinGuest(
+    code: string,
+    displayName: string,
+  ): Promise<{ participantId: string; matchId: string }> {
     const invite = await this.findInvite(code);
-    if (!invite || !["DRAFT", "LOBBY"].includes(invite.state)) throw new Error("Invite is invalid or match already started");
-    const [participant] = await this.connection.sql<{ participantId: string }[]>`
+    if (!invite || !["DRAFT", "LOBBY"].includes(invite.state))
+      throw new Error("Invite is invalid or match already started");
+    const [participant] = await this.connection.sql<
+      { participantId: string }[]
+    >`
       insert into participants (match_id, display_name, role, consent_location_at, consent_replay_at)
       values (${invite.matchId}, ${displayName}, 'SPECTATOR', now(), now())
       returning id as "participantId"
     `;
     if (!participant) throw new Error("Guest join failed");
-    return { participantId: participant.participantId, matchId: invite.matchId };
+    return {
+      participantId: participant.participantId,
+      matchId: invite.matchId,
+    };
   }
 
-  async joinTelegram(code: string, accountId: string): Promise<{ participantId: string; matchId: string }> {
+  async joinGuestSession(
+    code: string,
+    displayName: string,
+    days: number,
+    previous?: { id: string; token: string },
+  ): Promise<{
+    participantId: string;
+    matchId: string;
+    token: string;
+    expiresAt: Date;
+  }> {
+    const token = newOpaqueToken();
+    const expiresAt = new Date(Date.now() + days * 86_400_000);
+    return this.connection.sql.begin(async (transaction) => {
+      let previousGuest: { participantId: string; matchId: string } | undefined;
+      if (previous) {
+        const [current] = await transaction<
+          {
+            kind: "TELEGRAM" | "WEB" | "GUEST";
+            participantId: string | null;
+            matchId: string | null;
+          }[]
+        >`
+          select s.kind, s.participant_id as "participantId", p.match_id as "matchId"
+          from auth_sessions s
+          left join participants p on p.id=s.participant_id
+          where s.id=${previous.id} and s.token_hash=${hashToken(previous.token)}
+          for update of s
+        `;
+        if (!current) throw new Error("Previous session was already replaced");
+        if (
+          current.kind === "GUEST" &&
+          current.participantId &&
+          current.matchId
+        ) {
+          previousGuest = {
+            participantId: current.participantId,
+            matchId: current.matchId,
+          };
+        }
+      }
+
+      const [candidate] = await transaction<{ matchId: string }[]>`
+        select match_id as "matchId" from invitations
+        where code_hash=${hashToken(code)} and revoked_at is null
+          and (expires_at is null or expires_at > clock_timestamp())
+      `;
+      if (!candidate)
+        throw new Error("Invite is invalid or match already started");
+
+      const matchIds = [candidate.matchId, previousGuest?.matchId]
+        .filter((value): value is string => Boolean(value))
+        .filter((value, index, values) => values.indexOf(value) === index)
+        .sort();
+      for (const matchId of matchIds) {
+        await transaction`select id from matches where id=${matchId} for update`;
+      }
+
+      const [invite] = await transaction<
+        { matchId: string; state: MatchState }[]
+      >`
+        select i.match_id as "matchId", m.state
+        from invitations i join matches m on m.id=i.match_id
+        where i.code_hash=${hashToken(code)} and i.revoked_at is null
+          and (i.expires_at is null or i.expires_at > clock_timestamp())
+      `;
+      if (!invite || !["DRAFT", "LOBBY"].includes(invite.state)) {
+        throw new Error("Invite is invalid or match already started");
+      }
+
+      const [participant] = await transaction<{ participantId: string }[]>`
+        insert into participants (match_id, display_name, role, consent_location_at, consent_replay_at)
+        values (${invite.matchId}, ${displayName}, 'SPECTATOR', now(), now())
+        returning id as "participantId"
+      `;
+      if (!participant) throw new Error("Guest join failed");
+
+      if (previous) {
+        if (previousGuest) {
+          await transaction`
+            update participants set status='LEFT', left_at=now()
+            where id=${previousGuest.participantId} and status <> 'LEFT'
+          `;
+          await finishIfNoActiveHiders(transaction, previousGuest.matchId);
+        }
+        await transaction`
+          delete from auth_sessions
+          where id=${previous.id} and token_hash=${hashToken(previous.token)}
+        `;
+      }
+      await transaction`
+        insert into auth_sessions (token_hash, kind, participant_id, expires_at)
+        values (${hashToken(token)}, 'GUEST', ${participant.participantId}, ${expiresAt.toISOString()})
+      `;
+      return {
+        participantId: participant.participantId,
+        matchId: invite.matchId,
+        token,
+        expiresAt,
+      };
+    });
+  }
+
+  async joinAccount(
+    code: string,
+    accountId: string,
+  ): Promise<{ participantId: string; matchId: string }> {
     const invite = await this.findInvite(code);
-    if (!invite || !["DRAFT", "LOBBY"].includes(invite.state)) throw new Error("Invite is invalid or match already started");
+    if (!invite || !["DRAFT", "LOBBY"].includes(invite.state))
+      throw new Error("Invite is invalid or match already started");
     const [account] = await this.connection.sql<{ displayName: string }[]>`
       select trim(concat(first_name, ' ', coalesce(last_name, ''))) as "displayName" from accounts where id = ${accountId}
     `;
     if (!account) throw new Error("Account missing");
-    const [participant] = await this.connection.sql<{ participantId: string }[]>`
+    const [participant] = await this.connection.sql<
+      { participantId: string }[]
+    >`
       insert into participants (match_id, account_id, display_name, role, consent_location_at, consent_replay_at)
       values (${invite.matchId}, ${accountId}, ${account.displayName}, 'SPECTATOR', now(), now())
       on conflict (match_id, account_id) do update set left_at = null, status = 'ACTIVE'
       returning id as "participantId"
     `;
-    if (!participant) throw new Error("Telegram join failed");
-    return { participantId: participant.participantId, matchId: invite.matchId };
+    if (!participant) throw new Error("Account join failed");
+    return {
+      participantId: participant.participantId,
+      matchId: invite.matchId,
+    };
   }
 
-  async createMatch(accountId: string, input: CreateMatchInput): Promise<{ matchId: string; inviteCode: string; participantId: string }> {
+  async createMatch(
+    accountId: string,
+    input: CreateMatchInput,
+  ): Promise<{ matchId: string; inviteCode: string; participantId: string }> {
     const inviteCode = newOpaqueToken(18);
     return this.connection.sql.begin(async (transaction) => {
       const [match] = await transaction<{ id: string }[]>`
@@ -294,16 +668,23 @@ export class GameStore {
     `;
   }
 
-  async getAccountIdByTelegramId(telegramUserId: string): Promise<string | null> {
+  async getAccountIdByTelegramId(
+    telegramUserId: string,
+  ): Promise<string | null> {
     const [account] = await this.connection.sql<{ id: string }[]>`
       select id from accounts where telegram_user_id=${telegramUserId}
     `;
     return account?.id ?? null;
   }
 
-  async performTelegramHostAction(telegramUserId: string, matchId: string, action: MatchAction): Promise<MatchState> {
+  async performTelegramHostAction(
+    telegramUserId: string,
+    matchId: string,
+    action: MatchAction,
+  ): Promise<MatchState> {
     const accountId = await this.getAccountIdByTelegramId(telegramUserId);
-    if (!accountId) throw new Error("Open the Mini App once to link your Telegram account");
+    if (!accountId)
+      throw new Error("Open the Mini App once to link your Telegram account");
     await this.assertHost(matchId, accountId);
     const [host] = await this.connection.sql<{ participantId: string }[]>`
       select id as "participantId" from participants where match_id=${matchId} and account_id=${accountId} and status <> 'LEFT'
@@ -312,9 +693,13 @@ export class GameStore {
     return this.performAction(matchId, host.participantId, action);
   }
 
-  async rotateTelegramHostInvite(telegramUserId: string, matchId: string): Promise<string> {
+  async rotateTelegramHostInvite(
+    telegramUserId: string,
+    matchId: string,
+  ): Promise<string> {
     const accountId = await this.getAccountIdByTelegramId(telegramUserId);
-    if (!accountId) throw new Error("Open the Mini App once to link your Telegram account");
+    if (!accountId)
+      throw new Error("Open the Mini App once to link your Telegram account");
     await this.assertHost(matchId, accountId);
     return this.rotateInvite(matchId);
   }
@@ -329,7 +714,10 @@ export class GameStore {
     return code;
   }
 
-  async getViewer(matchId: string, session: SessionContext): Promise<ViewerContext | null> {
+  async getViewer(
+    matchId: string,
+    session: SessionContext,
+  ): Promise<ViewerContext | null> {
     const [viewer] = session.participantId
       ? await this.connection.sql<ViewerContext[]>`
           select p.id as "participantId", p.account_id as "accountId", p.role, p.display_name as "displayName",
@@ -347,8 +735,9 @@ export class GameStore {
   }
 
   async assertHost(matchId: string, accountId: string | null): Promise<void> {
-    if (!accountId) throw new Error("Telegram host authentication required");
-    const [match] = await this.connection.sql`select id from matches where id = ${matchId} and host_account_id = ${accountId}`;
+    if (!accountId) throw new Error("Host account authentication required");
+    const [match] = await this.connection
+      .sql`select id from matches where id = ${matchId} and host_account_id = ${accountId}`;
     if (!match) throw new Error("Host access required");
   }
 
@@ -391,11 +780,19 @@ export class GameStore {
     `;
     return {
       match: {
-        id: String(row.id), hostAccountId: String(row.hostAccountId), telegramChatId: row.telegramChatId as string | null,
-        name: String(row.name), state: row.state as MatchState, stateBeforePause: row.stateBeforePause as MatchState | null,
-        winnerRole: row.winnerRole as "HIDER" | "SEEKER" | null, phaseStartedAt: row.phaseStartedAt as Date | null,
-        phaseEndsAt: row.phaseEndsAt as Date | null, activeStartedAt: row.activeStartedAt as Date | null,
-        pausedAt: row.pausedAt as Date | null, pausedDurationMs: Number(row.pausedDurationMs), emergencyReveal: Boolean(row.emergencyReveal),
+        id: String(row.id),
+        hostAccountId: String(row.hostAccountId),
+        telegramChatId: row.telegramChatId as string | null,
+        name: String(row.name),
+        state: row.state as MatchState,
+        stateBeforePause: row.stateBeforePause as MatchState | null,
+        winnerRole: row.winnerRole as "HIDER" | "SEEKER" | null,
+        phaseStartedAt: row.phaseStartedAt as Date | null,
+        phaseEndsAt: row.phaseEndsAt as Date | null,
+        activeStartedAt: row.activeStartedAt as Date | null,
+        pausedAt: row.pausedAt as Date | null,
+        pausedDurationMs: Number(row.pausedDurationMs),
+        emergencyReveal: Boolean(row.emergencyReveal),
       },
       settings: settingsFromRow(row),
       rules: rulesRaw.map((rule) => VisibilityRuleSchema.parse(rule)),
@@ -407,9 +804,13 @@ export class GameStore {
 
   async updateMatch(matchId: string, input: UpdateMatchInput): Promise<void> {
     await this.connection.sql.begin(async (transaction) => {
-      const [match] = await transaction<{ state: MatchState }[]>`select state from matches where id = ${matchId} for update`;
-      if (!match || !["DRAFT", "LOBBY"].includes(match.state)) throw new Error("Only draft or lobby matches can be edited");
-      if (input.name) await transaction`update matches set name = ${input.name} where id = ${matchId}`;
+      const [match] = await transaction<
+        { state: MatchState }[]
+      >`select state from matches where id = ${matchId} for update`;
+      if (!match || !["DRAFT", "LOBBY"].includes(match.state))
+        throw new Error("Only draft or lobby matches can be edited");
+      if (input.name)
+        await transaction`update matches set name = ${input.name} where id = ${matchId}`;
       if (input.playzone) {
         await transaction`
           update playzones set polygon = ST_SetSRID(ST_GeomFromGeoJSON(${JSON.stringify(input.playzone)}), 4326), updated_at = now()
@@ -441,27 +842,45 @@ export class GameStore {
     });
   }
 
-  async assignRole(matchId: string, participantId: string, role: Exclude<PlayerRole, "HOST">): Promise<void> {
-    const result = await this.connection.sql`
-      update participants p set role = ${role}, status = 'ACTIVE'
-      from matches m where p.id = ${participantId} and p.match_id = ${matchId} and m.id = p.match_id
-        and m.state in ('DRAFT', 'LOBBY')
-      returning p.id
-    `;
-    if (result.count !== 1) throw new Error("Role cannot be assigned");
-    await this.connection.sql`insert into game_events (match_id, type, target_participant_id, payload) values (${matchId}, 'ROLE_ASSIGNED', ${participantId}, ${jsonPayload({ role })})`;
+  async assignRole(
+    matchId: string,
+    participantId: string,
+    role: Exclude<PlayerRole, "HOST">,
+  ): Promise<void> {
+    await this.connection.sql.begin(async (transaction) => {
+      const [match] = await transaction<{ state: MatchState }[]>`
+        select state from matches where id=${matchId} for update
+      `;
+      if (!match || !["DRAFT", "LOBBY"].includes(match.state)) {
+        throw new Error("Roles can only be assigned in the lobby");
+      }
+      const result = await transaction`
+        update participants set role=${role}, status='ACTIVE'
+        where id=${participantId} and match_id=${matchId}
+        returning id
+      `;
+      if (result.count !== 1) throw new Error("Role cannot be assigned");
+      await transaction`
+        insert into game_events (match_id, type, target_participant_id, payload)
+        values (${matchId}, 'ROLE_ASSIGNED', ${participantId}, ${jsonPayload({ role })})
+      `;
+    });
   }
 
   async autoBalance(matchId: string): Promise<void> {
     await this.connection.sql.begin(async (transaction) => {
-      const [match] = await transaction<{ state: MatchState }[]>`select state from matches where id=${matchId} for update`;
-      if (!match || !["DRAFT", "LOBBY"].includes(match.state)) throw new Error("Roles can only be balanced before the match starts");
+      const [match] = await transaction<
+        { state: MatchState }[]
+      >`select state from matches where id=${matchId} for update`;
+      if (!match || !["DRAFT", "LOBBY"].includes(match.state))
+        throw new Error("Roles can only be balanced before the match starts");
       const players = await transaction<{ id: string }[]>`
         select p.id from participants p join matches m on m.id=p.match_id
         where p.match_id=${matchId} and p.status='ACTIVE' and p.account_id is distinct from m.host_account_id
         order by p.joined_at, p.id
       `;
-      if (players.length < 2) throw new Error("At least two players are required to balance roles");
+      if (players.length < 2)
+        throw new Error("At least two players are required to balance roles");
       const seekerCount = Math.max(1, Math.round(players.length / 4));
       for (const [index, player] of players.entries()) {
         await transaction`update participants set role=${index < seekerCount ? "SEEKER" : "HIDER"} where id=${player.id}`;
@@ -470,19 +889,39 @@ export class GameStore {
     });
   }
 
-  async moderateParticipant(matchId: string, participantId: string, action: "SPECTATE" | "DISQUALIFY" | "REMOVE"): Promise<void> {
-    const result = action === "REMOVE"
-      ? await this.connection.sql`update participants p set status='LEFT', left_at=now() from matches m where p.id=${participantId} and p.match_id=${matchId} and p.account_id is distinct from m.host_account_id and m.id=p.match_id and m.state not in ('FINISHED','CANCELED') returning p.id`
-      : action === "DISQUALIFY"
-        ? await this.connection.sql`update participants p set status='DISQUALIFIED', role='SPECTATOR' from matches m where p.id=${participantId} and p.match_id=${matchId} and p.account_id is distinct from m.host_account_id and m.id=p.match_id and m.state not in ('FINISHED','CANCELED') returning p.id`
-        : await this.connection.sql`update participants p set status='ACTIVE', role='SPECTATOR' from matches m where p.id=${participantId} and p.match_id=${matchId} and p.account_id is distinct from m.host_account_id and m.id=p.match_id and m.state not in ('FINISHED','CANCELED') returning p.id`;
-    if (result.count !== 1) throw new Error("Participant cannot be moderated");
-    await this.connection.sql`insert into game_events (match_id, type, target_participant_id, payload) values (${matchId}, 'PARTICIPANT_MODERATED', ${participantId}, ${jsonPayload({ action })})`;
+  async moderateParticipant(
+    matchId: string,
+    participantId: string,
+    action: "SPECTATE" | "DISQUALIFY" | "REMOVE",
+  ): Promise<void> {
+    await this.connection.sql.begin(async (transaction) => {
+      await transaction`select id from matches where id=${matchId} for update`;
+      const result =
+        action === "REMOVE"
+          ? await transaction`update participants p set status='LEFT', left_at=now() from matches m where p.id=${participantId} and p.match_id=${matchId} and p.account_id is distinct from m.host_account_id and m.id=p.match_id and m.state not in ('FINISHED','CANCELED') returning p.id`
+          : action === "DISQUALIFY"
+            ? await transaction`update participants p set status='DISQUALIFIED', role='SPECTATOR' from matches m where p.id=${participantId} and p.match_id=${matchId} and p.account_id is distinct from m.host_account_id and m.id=p.match_id and m.state not in ('FINISHED','CANCELED') returning p.id`
+            : await transaction`update participants p set status='ACTIVE', role='SPECTATOR' from matches m where p.id=${participantId} and p.match_id=${matchId} and p.account_id is distinct from m.host_account_id and m.id=p.match_id and m.state not in ('FINISHED','CANCELED') returning p.id`;
+      if (result.count !== 1)
+        throw new Error("Participant cannot be moderated");
+      await transaction`insert into game_events (match_id, type, target_participant_id, payload) values (${matchId}, 'PARTICIPANT_MODERATED', ${participantId}, ${jsonPayload({ action })})`;
+      await finishIfNoActiveHiders(transaction, matchId);
+    });
   }
 
-  async performAction(matchId: string, actorParticipantId: string, action: MatchAction): Promise<MatchState> {
+  async performAction(
+    matchId: string,
+    actorParticipantId: string,
+    action: MatchAction,
+  ): Promise<MatchState> {
     return this.connection.sql.begin(async (transaction) => {
-      const [match] = await transaction<{ state: MatchState; stateBeforePause: MatchState | null; pausedAt: Date | null }[]>`
+      const [match] = await transaction<
+        {
+          state: MatchState;
+          stateBeforePause: MatchState | null;
+          pausedAt: Date | null;
+        }[]
+      >`
         select state, state_before_pause as "stateBeforePause", paused_at as "pausedAt" from matches where id = ${matchId} for update
       `;
       if (!match) throw new Error("Match not found");
@@ -494,17 +933,31 @@ export class GameStore {
         nextState = "LOBBY";
         await transaction`update matches set state='LOBBY', phase_started_at=${nowIso} where id=${matchId}`;
       } else if (action === "START") {
-        const [counts] = await transaction<{ hiders: number; seekers: number; hideSeconds: number; durationSeconds: number }[]>`
+        const [counts] = await transaction<
+          {
+            hiders: number;
+            seekers: number;
+            hideSeconds: number;
+            durationSeconds: number;
+          }[]
+        >`
           select count(*) filter (where p.role='HIDER' and p.status='ACTIVE')::integer as hiders,
             count(*) filter (where p.role='SEEKER' and p.status='ACTIVE')::integer as seekers,
             s.hide_seconds as "hideSeconds", s.duration_seconds as "durationSeconds"
           from participants p cross join match_settings s where p.match_id=${matchId} and s.match_id=${matchId}
           group by s.hide_seconds, s.duration_seconds
         `;
-        if (!counts || counts.hiders < 1 || counts.seekers < 1) throw new Error("Match needs at least one hider and one seeker");
+        if (!counts || counts.hiders < 1 || counts.seekers < 1)
+          throw new Error("Match needs at least one hider and one seeker");
         nextState = counts.hideSeconds > 0 ? "HIDING" : "ACTIVE";
         assertTransition(match.state, nextState);
-        const phaseEndsAt = new Date(now.getTime() + (counts.hideSeconds > 0 ? counts.hideSeconds : counts.durationSeconds) * 1000);
+        const phaseEndsAt = new Date(
+          now.getTime() +
+            (counts.hideSeconds > 0
+              ? counts.hideSeconds
+              : counts.durationSeconds) *
+              1000,
+        );
         await transaction`
           update matches set state=${nextState}, phase_started_at=${nowIso}, phase_ends_at=${phaseEndsAt.toISOString()},
             active_started_at=${nextState === "ACTIVE" ? nowIso : null}, paused_at=null, paused_duration_ms=0 where id=${matchId}
@@ -514,7 +967,12 @@ export class GameStore {
         nextState = "PAUSED";
         await transaction`update matches set state='PAUSED', state_before_pause=${match.state}, paused_at=${nowIso} where id=${matchId}`;
       } else if (action === "RESUME") {
-        if (match.state !== "PAUSED" || !match.stateBeforePause || !match.pausedAt) throw new Error("Match is not paused");
+        if (
+          match.state !== "PAUSED" ||
+          !match.stateBeforePause ||
+          !match.pausedAt
+        )
+          throw new Error("Match is not paused");
         nextState = match.stateBeforePause;
         const pauseMs = now.getTime() - match.pausedAt.getTime();
         await transaction`
@@ -523,15 +981,21 @@ export class GameStore {
           where id=${matchId}
         `;
       } else if (action === "END") {
-        if (["FINISHED", "CANCELED"].includes(match.state)) throw new Error("Match already closed");
+        if (["FINISHED", "CANCELED"].includes(match.state))
+          throw new Error("Match already closed");
         nextState = "FINISHED";
         await transaction`update matches set state='FINISHED', phase_ends_at=${nowIso}, finished_at=${nowIso}, emergency_reveal=false where id=${matchId}`;
       } else if (action === "CANCEL") {
-        if (["FINISHED", "CANCELED"].includes(match.state)) throw new Error("Match already closed");
+        if (["FINISHED", "CANCELED"].includes(match.state))
+          throw new Error("Match already closed");
         nextState = "CANCELED";
         await transaction`update matches set state='CANCELED', phase_ends_at=${nowIso}, finished_at=${nowIso}, emergency_reveal=false where id=${matchId}`;
-      } else if (action === "EMERGENCY_REVEAL_ON" || action === "EMERGENCY_REVEAL_OFF") {
-        if (["FINISHED", "CANCELED"].includes(match.state)) throw new Error("Match already closed");
+      } else if (
+        action === "EMERGENCY_REVEAL_ON" ||
+        action === "EMERGENCY_REVEAL_OFF"
+      ) {
+        if (["FINISHED", "CANCELED"].includes(match.state))
+          throw new Error("Match already closed");
         await transaction`update matches set emergency_reveal=${action === "EMERGENCY_REVEAL_ON"} where id=${matchId}`;
       }
       await transaction`
@@ -542,48 +1006,82 @@ export class GameStore {
     });
   }
 
-  async advanceTimers(): Promise<Array<{ matchId: string; state: MatchState }>> {
-    const activated = await this.connection.sql<{ matchId: string; state: MatchState }[]>`
-      update matches m set state='ACTIVE', phase_started_at=now(), active_started_at=now(), paused_duration_ms=0,
-        phase_ends_at=now()+(s.duration_seconds * interval '1 second')
-      from match_settings s where m.id=s.match_id and m.state='HIDING' and m.phase_ends_at<=now()
-      returning m.id as "matchId", m.state
-    `;
-    for (const item of activated) await this.connection.sql`insert into game_events (match_id, type) values (${item.matchId}, 'HIDING_ENDED')`;
-    const finished = await this.connection.sql<{ matchId: string; state: MatchState }[]>`
-      update matches set state='FINISHED', winner_role='HIDER', finished_at=now(), emergency_reveal=false
-      where state='ACTIVE' and phase_ends_at<=now()
-      returning id as "matchId", state
-    `;
-    for (const item of finished) await this.connection.sql`insert into game_events (match_id, type, payload) values (${item.matchId}, 'MATCH_FINISHED', '{"winnerRole":"HIDER"}'::jsonb)`;
-    return [...activated, ...finished];
+  async advanceTimers(): Promise<
+    Array<{ matchId: string; state: MatchState }>
+  > {
+    return this.connection.sql.begin(async (transaction) => {
+      const activated = await transaction<
+        { matchId: string; state: MatchState }[]
+      >`
+        update matches m set state='ACTIVE', phase_started_at=clock_timestamp(), active_started_at=clock_timestamp(), paused_duration_ms=0,
+          phase_ends_at=clock_timestamp()+(s.duration_seconds * interval '1 second')
+        from match_settings s where m.id=s.match_id and m.state='HIDING' and m.phase_ends_at<=clock_timestamp()
+        returning m.id as "matchId", m.state
+      `;
+      for (const item of activated) {
+        await transaction`
+          insert into game_events (match_id, type)
+          values (${item.matchId}, 'HIDING_ENDED')
+        `;
+      }
+      const finished = await transaction<
+        { matchId: string; state: MatchState }[]
+      >`
+        update matches set state='FINISHED', winner_role='HIDER', finished_at=clock_timestamp(), emergency_reveal=false
+        where state='ACTIVE' and phase_ends_at<=clock_timestamp()
+          and exists (
+            select 1 from participants p
+            where p.match_id=matches.id and p.role='HIDER' and p.status='ACTIVE'
+          )
+        returning id as "matchId", state
+      `;
+      for (const item of finished) {
+        await transaction`
+          insert into game_events (match_id, type, payload)
+          values (${item.matchId}, 'MATCH_FINISHED', '{"winnerRole":"HIDER"}'::jsonb)
+        `;
+      }
+      return [...activated, ...finished];
+    });
   }
 
-  async getPreviousPosition(participantId: string): Promise<Position | null> {
-    const [position] = await this.connection.sql<Position[]>`
+  async getPreviousPosition(
+    participantId: string,
+  ): Promise<(Position & { clientSequence: number }) | null> {
+    const [position] = await this.connection.sql<
+      Array<Position & { clientSequence: number }>
+    >`
       select ST_Y(point::geometry) as latitude, ST_X(point::geometry) as longitude,
         accuracy_meters as "accuracyMeters", speed_mps as "speedMps", heading_degrees as "headingDegrees",
-        recorded_at::text as "recordedAt" from latest_locations where participant_id=${participantId}
+        recorded_at::text as "recordedAt", client_sequence::double precision as "clientSequence"
+      from latest_locations where participant_id=${participantId}
     `;
     return position ?? null;
   }
 
-  async saveLocation(participantId: string, update: LocationUpdate): Promise<BoundaryResult> {
+  async saveLocation(
+    participantId: string,
+    update: LocationUpdate,
+  ): Promise<BoundaryResult | null> {
     return this.connection.sql.begin(async (transaction) => {
       const point = transaction`ST_SetSRID(ST_MakePoint(${update.longitude}, ${update.latitude}), 4326)::geography`;
-      await transaction`
-        insert into location_samples (match_id, participant_id, point, recorded_at, accuracy_meters, speed_mps, heading_degrees, source, client_sequence)
-        values (${update.matchId}, ${participantId}, ${point}, ${update.recordedAt}, ${update.accuracyMeters}, ${update.speedMps}, ${update.headingDegrees}, ${update.source}, ${update.clientSequence})
-      `;
-      await transaction`
+      const [saved] = await transaction`
         insert into latest_locations (participant_id, match_id, point, recorded_at, accuracy_meters, speed_mps, heading_degrees, source, client_sequence)
         values (${participantId}, ${update.matchId}, ${point}, ${update.recordedAt}, ${update.accuracyMeters}, ${update.speedMps}, ${update.headingDegrees}, ${update.source}, ${update.clientSequence})
         on conflict (participant_id) do update set point=excluded.point, recorded_at=excluded.recorded_at,
           received_at=now(), accuracy_meters=excluded.accuracy_meters, speed_mps=excluded.speed_mps,
           heading_degrees=excluded.heading_degrees, source=excluded.source, client_sequence=excluded.client_sequence
         where latest_locations.client_sequence < excluded.client_sequence
+        returning participant_id
       `;
-      const [boundary] = await transaction<{ inside: boolean; graceSeconds: number; disqualify: boolean }[]>`
+      if (!saved) return null;
+      await transaction`
+        insert into location_samples (match_id, participant_id, point, recorded_at, accuracy_meters, speed_mps, heading_degrees, source, client_sequence)
+        values (${update.matchId}, ${participantId}, ${point}, ${update.recordedAt}, ${update.accuracyMeters}, ${update.speedMps}, ${update.headingDegrees}, ${update.source}, ${update.clientSequence})
+      `;
+      const [boundary] = await transaction<
+        { inside: boolean; graceSeconds: number; disqualify: boolean }[]
+      >`
         select ST_Covers(z.polygon, ${point}::geometry) as inside, s.boundary_grace_seconds as "graceSeconds",
           s.boundary_disqualify as disqualify from playzones z join match_settings s on s.match_id=z.match_id where z.match_id=${update.matchId}
       `;
@@ -591,14 +1089,25 @@ export class GameStore {
       const now = new Date();
       const nowIso = now.toISOString();
       if (boundary.inside) {
-        const [existing] = await transaction`delete from boundary_states where participant_id=${participantId} returning participant_id`;
-        if (existing) await transaction`insert into game_events (match_id, type, actor_participant_id, point) values (${update.matchId}, 'BOUNDARY_REENTERED', ${participantId}, ${point})`;
-        return { outside: false, graceEndsAt: null, actionApplied: false, disqualified: false };
+        const [existing] =
+          await transaction`delete from boundary_states where participant_id=${participantId} returning participant_id`;
+        if (existing)
+          await transaction`insert into game_events (match_id, type, actor_participant_id, point) values (${update.matchId}, 'BOUNDARY_REENTERED', ${participantId}, ${point})`;
+        return {
+          outside: false,
+          graceEndsAt: null,
+          actionApplied: false,
+          disqualified: false,
+        };
       }
-      const [existing] = await transaction<{ graceEndsAt: Date; actionAppliedAt: Date | null }[]>`
+      const [existing] = await transaction<
+        { graceEndsAt: Date; actionAppliedAt: Date | null }[]
+      >`
         select grace_ends_at as "graceEndsAt", action_applied_at as "actionAppliedAt" from boundary_states where participant_id=${participantId} for update
       `;
-      const graceEndsAt = existing?.graceEndsAt ?? new Date(now.getTime() + boundary.graceSeconds * 1000);
+      const graceEndsAt =
+        existing?.graceEndsAt ??
+        new Date(now.getTime() + boundary.graceSeconds * 1000);
       if (!existing) {
         await transaction`insert into boundary_states (participant_id, match_id, outside_since, grace_ends_at) values (${participantId}, ${update.matchId}, ${nowIso}, ${graceEndsAt.toISOString()})`;
         await transaction`insert into game_events (match_id, type, actor_participant_id, point, payload) values (${update.matchId}, 'BOUNDARY_WARNING', ${participantId}, ${point}, ${jsonPayload({ graceEndsAt: graceEndsAt.toISOString() })})`;
@@ -608,14 +1117,26 @@ export class GameStore {
         await transaction`update boundary_states set action_applied_at=${nowIso}, updated_at=${nowIso} where participant_id=${participantId}`;
         await transaction`insert into game_events (match_id, type, actor_participant_id, point) values (${update.matchId}, 'BOUNDARY_GRACE_EXPIRED', ${participantId}, ${point})`;
         if (boundary.disqualify) {
+          await transaction`select id from matches where id=${update.matchId} for update`;
           await transaction`update participants set status='DISQUALIFIED', role='SPECTATOR' where id=${participantId}`;
+          await finishIfNoActiveHiders(transaction, update.matchId);
         }
       }
-      return { outside: true, graceEndsAt, actionApplied: shouldApply, disqualified: shouldApply && boundary.disqualify };
+      return {
+        outside: true,
+        graceEndsAt,
+        actionApplied: shouldApply,
+        disqualified: shouldApply && boundary.disqualify,
+      };
     });
   }
 
-  async recordRejectedLocation(participantId: string, matchId: string, reason: string, update: LocationUpdate): Promise<void> {
+  async recordRejectedLocation(
+    participantId: string,
+    matchId: string,
+    reason: string,
+    update: LocationUpdate,
+  ): Promise<void> {
     await this.connection.sql`
       insert into game_events (match_id, type, actor_participant_id, payload)
       values (${matchId}, 'LOCATION_REJECTED', ${participantId}, ${jsonPayload({ reason, sequence: update.clientSequence, accuracyMeters: update.accuracyMeters })})
@@ -623,7 +1144,9 @@ export class GameStore {
   }
 
   async loadTagData(matchId: string, seekerId: string, targetId: string) {
-    const rows = await this.connection.sql<Array<RuntimeLocation & { id: string }>>`
+    const rows = await this.connection.sql<
+      Array<RuntimeLocation & { id: string }>
+    >`
       select p.id, p.role, p.display_name as "displayName", l.client_sequence::double precision as "clientSequence",
         ST_Y(l.point::geometry) as latitude, ST_X(l.point::geometry) as longitude,
         l.accuracy_meters as "accuracyMeters", l.speed_mps as "speedMps", l.heading_degrees as "headingDegrees",
@@ -631,7 +1154,10 @@ export class GameStore {
       from participants p join latest_locations l on l.participant_id=p.id
       where p.match_id=${matchId} and p.id in (${seekerId}, ${targetId}) and p.status='ACTIVE'
     `;
-    return { seeker: rows.find((row) => row.id === seekerId) ?? null, target: rows.find((row) => row.id === targetId) ?? null };
+    return {
+      seeker: rows.find((row) => row.id === seekerId) ?? null,
+      target: rows.find((row) => row.id === targetId) ?? null,
+    };
   }
 
   async activeHidersWithLocations(matchId: string): Promise<RuntimeLocation[]> {
@@ -645,77 +1171,186 @@ export class GameStore {
     `;
   }
 
-  async isTagWithin(matchId: string, seekerId: string, targetId: string, radiusMeters: number): Promise<{ within: boolean; distanceMeters: number }> {
-    const [result] = await this.connection.sql<{ within: boolean; distanceMeters: number }[]>`
+  async isTagWithin(
+    matchId: string,
+    seekerId: string,
+    targetId: string,
+    radiusMeters: number,
+  ): Promise<{ within: boolean; distanceMeters: number }> {
+    const [result] = await this.connection.sql<
+      { within: boolean; distanceMeters: number }[]
+    >`
       select ST_DWithin(seeker.point, target.point, ${radiusMeters}) as within,
         ST_Distance(seeker.point, target.point) as "distanceMeters"
       from latest_locations seeker join latest_locations target on target.participant_id=${targetId}
       where seeker.participant_id=${seekerId} and seeker.match_id=${matchId} and target.match_id=${matchId}
     `;
-    return result ?? { within: false, distanceMeters: Number.POSITIVE_INFINITY };
+    return (
+      result ?? { within: false, distanceMeters: Number.POSITIVE_INFINITY }
+    );
   }
 
-  async forceSpectator(matchId: string, participantId: string, reason: "DENIED" | "INACCURATE"): Promise<boolean> {
-    const [changed] = await this.connection.sql`
-      update participants p set role='SPECTATOR'
-      from matches m
-      where p.id=${participantId} and p.match_id=${matchId} and m.id=p.match_id
-        and m.state='ACTIVE' and p.role not in ('HOST', 'SPECTATOR')
-      returning p.id
-    `;
-    if (!changed) return false;
-    await this.connection.sql`
-      insert into game_events (match_id, type, actor_participant_id, payload)
-      values (${matchId}, 'GPS_SPECTATOR_FORCED', ${participantId}, ${jsonPayload({ reason })})
-    `;
-    return true;
-  }
-
-  async applyTag(matchId: string, seekerId: string, targetId: string, caughtBehavior: "SEEKER" | "SPECTATOR", distanceMeters: number) {
+  async forceSpectator(
+    matchId: string,
+    participantId: string,
+    reason: "DENIED" | "INACCURATE",
+  ): Promise<boolean> {
     return this.connection.sql.begin(async (transaction) => {
-      const [target] = await transaction<{ role: PlayerRole; status: string }[]>`
-        select role, status from participants where id=${targetId} and match_id=${matchId} for update
+      await transaction`select id from matches where id=${matchId} for update`;
+      const [changed] = await transaction`
+        update participants p set role='SPECTATOR'
+        from matches m
+        where p.id=${participantId} and p.match_id=${matchId} and m.id=p.match_id
+          and m.state='ACTIVE' and p.role not in ('HOST', 'SPECTATOR')
+        returning p.id
       `;
-      if (!target || target.role !== "HIDER" || target.status !== "ACTIVE") return { applied: false, finished: false };
-      if (caughtBehavior === "SEEKER") {
-        await transaction`update participants set role='SEEKER', status='ACTIVE', tagged_at=now() where id=${targetId}`;
+      if (!changed) return false;
+      await transaction`
+        insert into game_events (match_id, type, actor_participant_id, payload)
+        values (${matchId}, 'GPS_SPECTATOR_FORCED', ${participantId}, ${jsonPayload({ reason })})
+      `;
+      await finishIfNoActiveHiders(transaction, matchId);
+      return true;
+    });
+  }
+
+  async applyTag(
+    matchId: string,
+    seekerId: string,
+    targetId: string,
+    _caughtBehavior: "SEEKER" | "SPECTATOR",
+    _distanceMeters: number,
+  ) {
+    return this.connection.sql.begin(async (transaction) => {
+      const [match] = await transaction<
+        {
+          state: MatchState;
+          expired: boolean;
+          currentTime: string;
+        }[]
+      >`
+        select state,
+          (phase_ends_at is not null and phase_ends_at <= clock_timestamp()) as expired,
+          clock_timestamp()::text as "currentTime"
+        from matches where id=${matchId} for update
+      `;
+      if (!match) return { applied: false, finished: false };
+      if (match.state === "ACTIVE" && match.expired) {
+        const [finished] = await transaction`
+          update matches set state='FINISHED', winner_role='HIDER',
+            finished_at=${match.currentTime}, emergency_reveal=false
+          where id=${matchId} and state='ACTIVE'
+            and exists (
+              select 1 from participants
+              where match_id=${matchId} and role='HIDER' and status='ACTIVE'
+            )
+          returning id
+        `;
+        if (finished) {
+          await transaction`
+            insert into game_events (match_id, type, payload, occurred_at)
+            values (${matchId}, 'MATCH_FINISHED', '{"winnerRole":"HIDER"}'::jsonb, ${match.currentTime})
+          `;
+        }
+        return { applied: false, finished: Boolean(finished) };
+      }
+      const [tag] = await transaction<
+        {
+          caughtBehavior: "SEEKER" | "SPECTATOR";
+          distanceMeters: number;
+          within: boolean;
+          cooldownSeconds: number;
+        }[]
+      >`
+        select settings.caught_behavior as "caughtBehavior",
+          ST_Distance(seeker_location.point, target_location.point)::double precision as "distanceMeters",
+          ST_DWithin(seeker_location.point, target_location.point, settings.tag_radius_meters) as within,
+          settings.tag_cooldown_seconds as "cooldownSeconds"
+        from participants target
+        join participants seeker on seeker.id=${seekerId} and seeker.match_id=target.match_id
+        join match_settings settings on settings.match_id=target.match_id
+        join latest_locations seeker_location on seeker_location.participant_id=seeker.id
+          and seeker_location.match_id=target.match_id
+        join latest_locations target_location on target_location.participant_id=target.id
+          and target_location.match_id=target.match_id
+        where target.id=${targetId} and target.match_id=${matchId}
+          and target.role='HIDER' and target.status='ACTIVE'
+          and seeker.role='SEEKER' and seeker.status='ACTIVE'
+          and seeker_location.recorded_at >= ${match.currentTime}::timestamptz
+            - (settings.position_max_age_seconds * interval '1 second')
+          and target_location.recorded_at >= ${match.currentTime}::timestamptz
+            - (settings.position_max_age_seconds * interval '1 second')
+          and seeker_location.recorded_at <= ${match.currentTime}::timestamptz + interval '30 seconds'
+          and target_location.recorded_at <= ${match.currentTime}::timestamptz + interval '30 seconds'
+          and seeker_location.accuracy_meters <= settings.max_accuracy_meters
+          and target_location.accuracy_meters <= settings.max_accuracy_meters
+        for update of target, seeker
+      `;
+      if (!tag || !tag.within) return { applied: false, finished: false };
+      const [cooldown] = await transaction<{ active: boolean }[]>`
+        select exists(
+          select 1 from game_events
+          where match_id=${matchId}
+            and type='PARTICIPANT_TAGGED'
+            and actor_participant_id=${seekerId}
+            and occurred_at > ${match.currentTime}::timestamptz
+              - (${tag.cooldownSeconds} * interval '1 second')
+        ) as active
+      `;
+      if (cooldown?.active) return { applied: false, finished: false };
+      if (tag.caughtBehavior === "SEEKER") {
+        await transaction`update participants set role='SEEKER', status='ACTIVE', tagged_at=${match.currentTime} where id=${targetId}`;
       } else {
-        await transaction`update participants set role='SPECTATOR', status='TAGGED', tagged_at=now() where id=${targetId}`;
+        await transaction`update participants set role='SPECTATOR', status='TAGGED', tagged_at=${match.currentTime} where id=${targetId}`;
       }
       await transaction`
-        insert into game_events (match_id, type, actor_participant_id, target_participant_id, payload)
-        values (${matchId}, 'PARTICIPANT_TAGGED', ${seekerId}, ${targetId}, ${jsonPayload({ caughtBehavior, distanceMeters })})
+        insert into game_events (match_id, type, actor_participant_id, target_participant_id, payload, occurred_at)
+        values (${matchId}, 'PARTICIPANT_TAGGED', ${seekerId}, ${targetId}, ${jsonPayload({ caughtBehavior: tag.caughtBehavior, distanceMeters: tag.distanceMeters })}, ${match.currentTime})
       `;
-      const [remaining] = await transaction<{ count: number }[]>`
-        select count(*)::integer as count from participants where match_id=${matchId} and role='HIDER' and status='ACTIVE'
-      `;
-      const finished = remaining?.count === 0;
-      if (finished) {
-        await transaction`update matches set state='FINISHED', winner_role='SEEKER', finished_at=now(), phase_ends_at=now(), emergency_reveal=false where id=${matchId} and state='ACTIVE'`;
-        await transaction`insert into game_events (match_id, type, payload) values (${matchId}, 'MATCH_FINISHED', '{"winnerRole":"SEEKER"}'::jsonb)`;
-      }
+      const finished = await finishIfNoActiveHiders(transaction, matchId);
       return { applied: true, finished };
     });
   }
 
-  async setReplayPublished(matchId: string, accountId: string, published: boolean): Promise<void> {
-    if (published) {
-      const [match] = await this.connection.sql`select id from matches where id=${matchId} and state='FINISHED'`;
-      if (!match) throw new Error("Only a finished match replay can be published");
-    }
-    if (published) {
-      await this.connection.sql`
-        insert into replay_publications (match_id, published_at, published_by_account_id)
-        values (${matchId}, now(), ${accountId}) on conflict (match_id) do update set published_at=now(), published_by_account_id=excluded.published_by_account_id
+  async setReplayPublished(
+    matchId: string,
+    accountId: string,
+    published: boolean,
+  ): Promise<void> {
+    await this.connection.sql.begin(async (transaction) => {
+      const [match] = await transaction<{ state: MatchState }[]>`
+        select state from matches
+        where id=${matchId} and host_account_id=${accountId}
+        for update
       `;
-    } else await this.connection.sql`delete from replay_publications where match_id=${matchId}`;
-    await this.connection.sql`insert into game_events (match_id, type, payload) values (${matchId}, 'REPLAY_PUBLICATION_CHANGED', ${jsonPayload({ published })})`;
+      if (!match) throw new Error("Host access required");
+      if (published && match.state !== "FINISHED")
+        throw new Error("Only a finished match replay can be published");
+
+      if (published) {
+        await transaction`
+          insert into replay_publications (match_id, published_at, published_by_account_id)
+          values (${matchId}, now(), ${accountId})
+          on conflict (match_id) do update
+          set published_at=now(), published_by_account_id=excluded.published_by_account_id
+        `;
+      } else {
+        await transaction`delete from replay_publications where match_id=${matchId}`;
+      }
+      await transaction`
+        insert into game_events (match_id, type, payload)
+        values (${matchId}, 'REPLAY_PUBLICATION_CHANGED', ${jsonPayload({ published })})
+      `;
+    });
   }
 
-  async mayViewReplay(matchId: string, session: SessionContext): Promise<boolean> {
+  async mayViewReplay(
+    matchId: string,
+    session: SessionContext,
+  ): Promise<boolean> {
     const [access] = await this.connection.sql<{ allowed: boolean }[]>`
       select exists(
-        select 1 from matches m where m.id=${matchId} and m.host_account_id=${session.accountId}
+        select 1 from matches m where m.id=${matchId} and m.state='FINISHED' and m.host_account_id=${session.accountId}
         union all
         select 1 from replay_publications r join participants p on p.match_id=r.match_id
           where r.match_id=${matchId} and (p.id=${session.participantId} or p.account_id=${session.accountId})
@@ -724,22 +1359,44 @@ export class GameStore {
     return access?.allowed ?? false;
   }
 
-  async getReplay(matchId: string): Promise<{ frames: ReplayFrame[]; events: unknown[]; participants: RuntimeParticipant[]; published: boolean }> {
-    const frames = await this.connection.sql<ReplayFrame[]>`
+  async getReplay(matchId: string): Promise<{
+    frames: ReplayFrame[];
+    events: unknown[];
+    participants: Array<Omit<RuntimeParticipant, "accountId">>;
+    published: boolean;
+    truncated: boolean;
+  }> {
+    const [match] = await this.connection.sql<{ state: string }[]>`
+      select state from matches where id=${matchId}
+    `;
+    if (match?.state !== "FINISHED")
+      throw new Error("Replay is available only after the match finishes");
+    const frameRows = await this.connection.sql<ReplayFrame[]>`
       select participant_id as "participantId", recorded_at::text as "recordedAt",
         ST_Y(point::geometry) as latitude, ST_X(point::geometry) as longitude,
         accuracy_meters as "accuracyMeters", speed_mps as "speedMps", heading_degrees as "headingDegrees"
       from location_samples where match_id=${matchId} order by recorded_at, id
+      limit 10001
     `;
-    const events = await this.connection.sql`
+    const eventRows = await this.connection.sql`
       select id, type, actor_participant_id as "actorParticipantId", target_participant_id as "targetParticipantId",
         payload, occurred_at::text as "occurredAt" from game_events where match_id=${matchId} order by occurred_at, id
+      limit 10001
     `;
-    const participantsRows = await this.connection.sql<RuntimeParticipant[]>`
-      select id, account_id as "accountId", display_name as "displayName", role, status from participants where match_id=${matchId}
+    const participantsRows = await this.connection.sql<
+      Array<Omit<RuntimeParticipant, "accountId">>
+    >`
+      select id, display_name as "displayName", role, status from participants where match_id=${matchId}
     `;
-    const [publication] = await this.connection.sql`select match_id from replay_publications where match_id=${matchId}`;
-    return { frames, events: [...events], participants: participantsRows, published: Boolean(publication) };
+    const [publication] = await this.connection
+      .sql`select match_id from replay_publications where match_id=${matchId}`;
+    return {
+      frames: frameRows.slice(0, 10_000),
+      events: [...eventRows].slice(0, 10_000),
+      participants: participantsRows,
+      published: Boolean(publication),
+      truncated: frameRows.length > 10_000 || eventRows.length > 10_000,
+    };
   }
 
   async deleteMatch(matchId: string): Promise<void> {

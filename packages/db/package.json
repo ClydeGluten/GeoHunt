@@ -5,7 +5,10 @@
   "type": "module",
   "main": "./dist/index.js",
   "types": "./dist/index.d.ts",
-  "files": ["dist", "migrations"],
+  "files": [
+    "dist",
+    "migrations"
+  ],
   "exports": {
     ".": {
       "types": "./dist/index.d.ts",
@@ -27,7 +30,7 @@
     "test:integration": "vitest run src/postgis.integration.test.ts"
   },
   "dependencies": {
-    "drizzle-orm": "^0.44.5",
+    "drizzle-orm": "^0.45.2",
     "postgres": "^3.4.7"
   },
   "devDependencies": {

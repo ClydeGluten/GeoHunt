@@ -1,9 +1,18 @@
 import type { MatchSnapshot, VisiblePosition } from "@geohunter/contracts";
 import { mayObserve } from "@geohunter/game-engine";
 import type { Redis } from "ioredis";
-import { viewerVisibilityRole, type GameStore, type ViewerContext } from "./store.js";
+import {
+  viewerVisibilityRole,
+  type GameStore,
+  type ViewerContext,
+} from "./store.js";
 
-export async function buildSnapshot(store: GameStore, redis: Redis, matchId: string, viewer: ViewerContext): Promise<MatchSnapshot> {
+export async function buildSnapshot(
+  store: GameStore,
+  redis: Redis,
+  matchId: string,
+  viewer: ViewerContext,
+): Promise<MatchSnapshot> {
   const runtime = await store.getRuntime(matchId);
   if (!runtime) throw new Error("Match not found");
   const now = new Date();
@@ -20,9 +29,20 @@ export async function buildSnapshot(store: GameStore, redis: Redis, matchId: str
   const visiblePositions: VisiblePosition[] = [];
 
   for (const location of runtime.locations) {
-    const authorization = mayObserve(observerRole, location.role, runtime.rules, clock, now);
-    const stale = now.getTime() - new Date(location.recordedAt).getTime() > runtime.settings.positionMaxAgeSeconds * 1000;
-    if (authorization.visible || location.participantId === viewer.participantId) {
+    const authorization = mayObserve(
+      observerRole,
+      location.role,
+      runtime.rules,
+      clock,
+      now,
+    );
+    const stale =
+      now.getTime() - new Date(location.recordedAt).getTime() >
+      runtime.settings.positionMaxAgeSeconds * 1000;
+    if (
+      authorization.visible ||
+      location.participantId === viewer.participantId
+    ) {
       const visible: VisiblePosition = {
         participantId: location.participantId,
         displayName: location.displayName,
@@ -37,11 +57,20 @@ export async function buildSnapshot(store: GameStore, redis: Redis, matchId: str
         frozen: false,
       };
       visiblePositions.push(visible);
-      await redis.hset(cacheKey, location.participantId, JSON.stringify(visible));
+      await redis.hset(
+        cacheKey,
+        location.participantId,
+        JSON.stringify(visible),
+      );
       await redis.expire(cacheKey, 86_400);
     } else if (authorization.frozen) {
       const cached = await redis.hget(cacheKey, location.participantId);
-      if (cached) visiblePositions.push({ ...(JSON.parse(cached) as VisiblePosition), stale: true, frozen: true });
+      if (cached)
+        visiblePositions.push({
+          ...(JSON.parse(cached) as VisiblePosition),
+          stale: true,
+          frozen: true,
+        });
     }
   }
 
@@ -54,9 +83,17 @@ export async function buildSnapshot(store: GameStore, redis: Redis, matchId: str
     viewerIsHost: viewer.isHost,
     playzone: runtime.playzone,
     settings: runtime.settings,
-    participants: runtime.participants.map((participant) => ({ ...participant, connected: false })),
+    participants: runtime.participants.map((participant) => ({
+      id: participant.id,
+      displayName: participant.displayName,
+      role: participant.role,
+      status: participant.status,
+      connected: false,
+    })),
     visiblePositions,
     phaseEndsAt: runtime.match.phaseEndsAt?.toISOString() ?? null,
+    pausedAt: runtime.match.pausedAt?.toISOString() ?? null,
+    winnerRole: runtime.match.winnerRole,
     emergencyReveal: runtime.match.emergencyReveal,
   };
 }

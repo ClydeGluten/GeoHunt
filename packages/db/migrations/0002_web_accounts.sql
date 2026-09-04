@@ -1,0 +1,2 @@
+ALTER TYPE session_kind ADD VALUE IF NOT EXISTS 'WEB';
+ALTER TABLE accounts ALTER COLUMN telegram_user_id DROP NOT NULL;

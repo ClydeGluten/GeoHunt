@@ -2,7 +2,6 @@ name: geohunter
 
 services:
   app:
-    container_name: geohunter
     build:
       context: .
       target: all-in-one
@@ -15,6 +14,7 @@ services:
       LOG_LEVEL: ${LOG_LEVEL:-info}
       DEV_AUTH_ENABLED: ${DEV_AUTH_ENABLED:-false}
       COOKIE_SECURE: ${COOKIE_SECURE:-true}
+      SESSION_DAYS: ${SESSION_DAYS:-30}
       APP_MODE: ${APP_MODE:-all}
       TUNNEL_MODE: ${TUNNEL_MODE:-quick}
       CLOUDFLARED_TUNNEL_TOKEN: ${CLOUDFLARED_TUNNEL_TOKEN:-}
@@ -35,10 +35,10 @@ services:
       MCP_DB_PASSWORD: ${MCP_DB_PASSWORD:?set MCP_DB_PASSWORD}
       REDIS_PASSWORD: ${REDIS_PASSWORD:?set REDIS_PASSWORD}
     ports:
-      - "80:80"
-      - "443:443"
-      - "443:443/udp"
-      - "127.0.0.1:${POSTGRES_DEV_PORT:-5432}:5432"
+      - "${WEB_PORT:-8080}:80"
+      - "${HTTPS_PORT:-8443}:443"
+      - "${HTTPS_PORT:-8443}:443/udp"
+      - "127.0.0.1:${POSTGRES_DEV_PORT:-55432}:5432"
     volumes:
       - postgres_data:/var/lib/postgresql/data
       - redis_data:/var/lib/redis
@@ -54,8 +54,5 @@ services:
 
 volumes:
   postgres_data:
-    name: geohunter_postgres_data
   redis_data:
-    name: geohunter_redis_data
   caddy_data:
-    name: geohunter_caddy_data

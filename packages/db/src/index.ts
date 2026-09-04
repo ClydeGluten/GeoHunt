@@ -3,8 +3,12 @@ import postgres from "postgres";
 import * as schema from "./schema.js";
 
 export type DatabaseConnection = ReturnType<typeof createDatabase>;
+export type DatabaseTransaction = postgres.TransactionSql;
 
-export function createDatabase(connectionString: string, options: { max?: number } = {}) {
+export function createDatabase(
+  connectionString: string,
+  options: { max?: number } = {},
+) {
   const client = postgres(connectionString, {
     max: options.max ?? 10,
     idle_timeout: 20,

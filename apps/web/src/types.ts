@@ -1,7 +1,7 @@
 import type { MatchState, ReplayFrame } from "@geohunter/contracts";
 
 export interface AuthMe {
-  kind: "TELEGRAM" | "GUEST";
+  kind: "TELEGRAM" | "WEB" | "GUEST";
   account: { id: string; displayName: string } | null;
   participantId: string | null;
 }
@@ -25,6 +25,12 @@ export interface InvitePreview {
 export interface ReplayData {
   frames: ReplayFrame[];
   events: Array<{ id: number; type: string; occurredAt: string }>;
-  participants: Array<{ id: string; displayName: string; role: string; status: string }>;
+  participants: Array<{
+    id: string;
+    displayName: string;
+    role: string;
+    status: string;
+  }>;
   published: boolean;
+  truncated: boolean;
 }

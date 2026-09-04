@@ -1,6 +1,18 @@
 import { describe, expect, it } from "vitest";
-import type { MatchSettings, Position, VisibilityRule } from "@geohunter/contracts";
-import { canTransition, mayObserve, revealState, validateLocation, validateTag, winnerFor } from "./index.js";
+import type {
+  MatchSettings,
+  Position,
+  VisibilityRule,
+} from "@geohunter/contracts";
+import {
+  canRecordLocation,
+  canTransition,
+  mayObserve,
+  revealState,
+  validateLocation,
+  validateTag,
+  winnerFor,
+} from "./index.js";
 
 const settings: MatchSettings = {
   durationSeconds: 3600,
@@ -19,13 +31,28 @@ const settings: MatchSettings = {
   boundaryDisqualify: false,
 };
 
-const position = (longitude: number, recordedAt = "2026-08-21T12:00:00.000Z"): Position => ({
+const position = (
+  longitude: number,
+  recordedAt = "2026-08-21T12:00:00.000Z",
+): Position => ({
   latitude: 51,
   longitude,
   accuracyMeters: 5,
   speedMps: null,
   headingDegrees: null,
   recordedAt,
+});
+
+describe("location recording lifecycle", () => {
+  it("records only active player roles during hiding or active play", () => {
+    expect(canRecordLocation("HIDING", "HIDER")).toBe(true);
+    expect(canRecordLocation("ACTIVE", "SEEKER")).toBe(true);
+    expect(canRecordLocation("LOBBY", "HIDER")).toBe(false);
+    expect(canRecordLocation("PAUSED", "SEEKER")).toBe(false);
+    expect(canRecordLocation("FINISHED", "HIDER")).toBe(false);
+    expect(canRecordLocation("ACTIVE", "HOST")).toBe(false);
+    expect(canRecordLocation("ACTIVE", "SPECTATOR")).toBe(false);
+  });
 });
 
 describe("match state", () => {
@@ -55,13 +82,27 @@ describe("visibility pulses", () => {
   };
 
   it("honors offset, reveal, and frozen last seen", () => {
-    expect(revealState(rule, clock, new Date("2026-08-21T12:00:10.000Z"))).toMatchObject({ visible: false, frozen: true });
-    expect(revealState(rule, clock, new Date("2026-08-21T12:00:25.000Z"))).toMatchObject({ visible: true, frozen: false });
-    expect(revealState(rule, clock, new Date("2026-08-21T12:00:40.000Z"))).toMatchObject({ visible: false, frozen: true });
+    expect(
+      revealState(rule, clock, new Date("2026-08-21T12:00:10.000Z")),
+    ).toMatchObject({ visible: false, frozen: true });
+    expect(
+      revealState(rule, clock, new Date("2026-08-21T12:00:25.000Z")),
+    ).toMatchObject({ visible: true, frozen: false });
+    expect(
+      revealState(rule, clock, new Date("2026-08-21T12:00:40.000Z")),
+    ).toMatchObject({ visible: false, frozen: true });
   });
 
   it("does not infer same-role visibility without an explicit rule", () => {
-    expect(mayObserve("HIDER", "HIDER", [], clock, new Date("2026-08-21T12:00:25.000Z"))).toMatchObject({ visible: false });
+    expect(
+      mayObserve(
+        "HIDER",
+        "HIDER",
+        [],
+        clock,
+        new Date("2026-08-21T12:00:25.000Z"),
+      ),
+    ).toMatchObject({ visible: false });
   });
 });
 
@@ -73,7 +114,10 @@ describe("location authority", () => {
       settings,
       new Date("2026-08-21T12:00:00.000Z"),
     );
-    expect(decision).toMatchObject({ accepted: false, reason: "IMPOSSIBLE_SPEED" });
+    expect(decision).toMatchObject({
+      accepted: false,
+      reason: "IMPOSSIBLE_SPEED",
+    });
   });
 
   it("accepts nearby fresh tag", () => {
