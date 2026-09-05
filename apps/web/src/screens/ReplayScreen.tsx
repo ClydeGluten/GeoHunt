@@ -11,9 +11,11 @@ import { ReplayExportLink } from "./ReplayExportLink";
 
 export function ReplayScreen({
   matchId,
+  demo = false,
   onBack,
 }: {
   matchId: string;
+  demo?: boolean;
   onBack: () => void;
 }) {
   const [replay, setReplay] = useState<ReplayData | null>(null);
@@ -127,7 +129,7 @@ export function ReplayScreen({
           <small>FULL REPLAY</small>
           <strong>{snapshot.name}</strong>
         </div>
-        {snapshot.viewerIsHost ? (
+        {snapshot.viewerIsHost && !demo ? (
           <button
             className="round-button"
             aria-label={published ? "Unpublish replay" : "Publish replay"}

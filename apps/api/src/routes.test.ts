@@ -8,7 +8,7 @@ import type { Redis } from "ioredis";
 import { createHmac } from "node:crypto";
 import { describe, expect, it, vi } from "vitest";
 import type { ApiConfig } from "./config.js";
-import { purgeRevealedLocations, registerRoutes } from "./routes.js";
+import { purgePlayerRuntimeData, registerRoutes } from "./routes.js";
 import type { GameStore } from "./store.js";
 
 const config = {
@@ -25,6 +25,7 @@ const config = {
   PUBLIC_WEBAPP_URL: "https://game.example",
   CORS_ORIGIN: "https://game.example",
   DEV_AUTH_ENABLED: false,
+  DEMO_MODE: false,
   COOKIE_SECURE: true,
   LOG_LEVEL: "silent",
 } satisfies ApiConfig;
@@ -296,6 +297,7 @@ describe("browser host authorization", () => {
 
   it("deletes the authenticated identity and clears its cookie", async () => {
     const deleteIdentity = vi.fn().mockResolvedValue({
+      accountIds: ["00000000-0000-4000-8000-000000000004"],
       matchIds: [],
       participantIds: [],
     });
@@ -316,7 +318,10 @@ describe("browser host authorization", () => {
     });
     await registerRoutes(app, {
       store,
-      redis: { eval: vi.fn().mockResolvedValue(1) } as unknown as Redis,
+      redis: {
+        eval: vi.fn().mockResolvedValue(1),
+        scan: vi.fn().mockResolvedValue(["0", []]),
+      } as unknown as Redis,
       config,
     });
 
@@ -332,7 +337,7 @@ describe("browser host authorization", () => {
     await app.close();
   });
 
-  it("purges deleted matches, viewers, and targets from location caches", async () => {
+  it("purges every participant-linked runtime cache", async () => {
     const redis = {
       scan: vi
         .fn()
@@ -342,13 +347,25 @@ describe("browser host authorization", () => {
             "revealed:hosted:viewer",
             "revealed:other:deleted-player",
             "revealed:other:another-viewer",
+            "presence:other",
+            "inaccurate:other:deleted-player",
+            "autotag:other:seeker:deleted-player",
+            "tagcooldown:other:deleted-player",
+            "rate:location:other:deleted-player",
+            "rate:location-status:other:deleted-player",
+            "rate:tag:other:deleted-player",
+            "rate:http:replay:deleted-player",
+            "rate:http:create-match:deleted-account",
+            "unrelated:key",
           ],
         ]),
       del: vi.fn().mockResolvedValue(1),
       hdel: vi.fn().mockResolvedValue(1),
+      srem: vi.fn().mockResolvedValue(1),
     } as unknown as Redis;
 
-    await purgeRevealedLocations(redis, {
+    await purgePlayerRuntimeData(redis, {
+      accountIds: ["deleted-account"],
       matchIds: ["hosted"],
       participantIds: ["deleted-player"],
     });
@@ -359,6 +376,24 @@ describe("browser host authorization", () => {
       "revealed:other:another-viewer",
       "deleted-player",
     );
+    expect(redis.srem).toHaveBeenCalledWith("presence:other", "deleted-player");
+    expect(redis.del).toHaveBeenCalledWith("inaccurate:other:deleted-player");
+    expect(redis.del).toHaveBeenCalledWith(
+      "autotag:other:seeker:deleted-player",
+    );
+    expect(redis.del).toHaveBeenCalledWith("tagcooldown:other:deleted-player");
+    expect(redis.del).toHaveBeenCalledWith(
+      "rate:location:other:deleted-player",
+    );
+    expect(redis.del).toHaveBeenCalledWith(
+      "rate:location-status:other:deleted-player",
+    );
+    expect(redis.del).toHaveBeenCalledWith("rate:tag:other:deleted-player");
+    expect(redis.del).toHaveBeenCalledWith("rate:http:replay:deleted-player");
+    expect(redis.del).toHaveBeenCalledWith(
+      "rate:http:create-match:deleted-account",
+    );
+    expect(redis.del).not.toHaveBeenCalledWith("unrelated:key");
   });
 
   it("rate-limits browser account creation by client address", async () => {
@@ -476,6 +511,112 @@ describe("browser host authorization", () => {
       },
       kind: "WEB",
     });
+    await app.close();
+  });
+
+  it("keeps the demo session endpoint disabled by default", async () => {
+    const start = vi.fn();
+    const app = Fastify({ logger: false });
+    app.setValidatorCompiler(validatorCompiler);
+    app.setSerializerCompiler(serializerCompiler);
+    await app.register(cookie);
+    app.decorateRequest("session", null);
+    await registerRoutes(app, {
+      store: {} as GameStore,
+      redis: { eval: vi.fn().mockResolvedValue(1) } as unknown as Redis,
+      config,
+      demo: { start },
+    });
+
+    const response = await app.inject({
+      method: "POST",
+      url: "/v1/demo/session",
+    });
+
+    expect(response.statusCode).toBe(404);
+    expect(start).not.toHaveBeenCalled();
+    await app.close();
+  });
+
+  it("opens the cached host session when demo mode is enabled", async () => {
+    const start = vi.fn().mockResolvedValue({
+      matchId: "00000000-0000-4000-8000-000000000001",
+      token: "demo-host-token",
+      expiresAt: new Date("2030-01-01T00:00:00.000Z"),
+      completion: Promise.resolve(),
+    });
+    const app = Fastify({ logger: false });
+    app.setValidatorCompiler(validatorCompiler);
+    app.setSerializerCompiler(serializerCompiler);
+    await app.register(cookie);
+    app.decorateRequest("session", null);
+    await registerRoutes(app, {
+      store: {} as GameStore,
+      redis: { eval: vi.fn().mockResolvedValue(1) } as unknown as Redis,
+      config: { ...config, DEMO_MODE: true },
+      demo: { start },
+    });
+
+    const response = await app.inject({
+      method: "POST",
+      url: "/v1/demo/session",
+    });
+
+    expect(response.statusCode).toBe(200);
+    expect(response.json()).toEqual({
+      matchId: "00000000-0000-4000-8000-000000000001",
+    });
+    expect(response.headers["set-cookie"]).toContain(
+      "geohunter_session=demo-host-token",
+    );
+    expect(response.headers["cache-control"]).toBe("no-store");
+    expect(start).toHaveBeenCalledOnce();
+    await app.close();
+  });
+
+  it("blocks state-changing API calls made with the demo host session", async () => {
+    const session = {
+      id: "demo-session",
+      kind: "WEB" as const,
+      accountId: "demo-host-account",
+      participantId: null,
+      expiresAt: new Date("2030-01-01T00:00:00.000Z"),
+      isDemo: true,
+    };
+    const deleteIdentity = vi.fn();
+    const revokeSession = vi.fn();
+    const app = Fastify({ logger: false });
+    app.setValidatorCompiler(validatorCompiler);
+    app.setSerializerCompiler(serializerCompiler);
+    await app.register(cookie);
+    app.decorateRequest("session", null);
+    app.addHook("onRequest", async (request) => {
+      request.session = session;
+    });
+    await registerRoutes(app, {
+      store: { deleteIdentity, revokeSession } as unknown as GameStore,
+      redis: { eval: vi.fn().mockResolvedValue(1) } as unknown as Redis,
+      config: { ...config, DEMO_MODE: true },
+      demo: { start: vi.fn() },
+    });
+
+    const response = await app.inject({ method: "DELETE", url: "/v1/account" });
+    const publication = await app.inject({
+      method: "PUT",
+      url: "/v1/matches/00000000-0000-4000-8000-000000000001/replay/publication",
+      payload: { published: true },
+    });
+    const logout = await app.inject({
+      method: "POST",
+      url: "/v1/auth/logout",
+      headers: { cookie: "geohunter_session=demo-token" },
+    });
+
+    expect(response.statusCode).toBe(403);
+    expect(publication.statusCode).toBe(403);
+    expect(logout.statusCode).toBe(204);
+    expect(deleteIdentity).not.toHaveBeenCalled();
+    expect(revokeSession).not.toHaveBeenCalled();
     await app.close();
   });
 });

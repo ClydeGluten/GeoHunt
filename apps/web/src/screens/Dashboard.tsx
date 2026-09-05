@@ -61,7 +61,7 @@ export function Dashboard({
   const deleteData = async () => {
     if (
       !window.confirm(
-        "Permanently delete this identity, its participation data, and every match it hosts?",
+        "Permanently delete this identity, nickname, sessions, location history, replay data, and every match it hosts? You will be removed from any active match. This cannot be undone.",
       )
     )
       return;

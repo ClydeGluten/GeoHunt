@@ -39,12 +39,17 @@ export default function App() {
       null
     );
   }, []);
+  const demoMode = useMemo(
+    () => new URLSearchParams(location.search).get("demo") === "1",
+    [],
+  );
 
   const navigate = (next: Route) => {
     setRoute(next);
     const params = new URLSearchParams();
     if (next.page === "game") params.set("match", next.id);
     if (next.page === "replay") params.set("replay", next.id);
+    if (demoMode) params.set("demo", "1");
     const invite = new URLSearchParams(location.search).get("invite");
     if (invite && next.page === "home") params.set("invite", invite);
     history.pushState(
@@ -71,6 +76,15 @@ export default function App() {
       const webApp = telegram();
       if (webApp?.initData) {
         await post("/v1/auth/telegram", { initData: webApp.initData });
+      }
+      if (demoMode) {
+        const demo = await post<{ matchId: string }>("/v1/demo/session");
+        setRoute({ page: "game", id: demo.matchId });
+        history.replaceState(
+          {},
+          "",
+          `${location.pathname}?match=${demo.matchId}&demo=1`,
+        );
       }
       await refreshAuth();
       setLoading(false);
@@ -152,6 +166,7 @@ export default function App() {
     return (
       <GameScreen
         matchId={route.id}
+        demo={demoMode}
         onBack={() => navigate({ page: "home" })}
         onReplay={() => navigate({ page: "replay", id: route.id })}
       />
@@ -160,6 +175,7 @@ export default function App() {
     return (
       <ReplayScreen
         matchId={route.id}
+        demo={demoMode}
         onBack={() => navigate({ page: "game", id: route.id })}
       />
     );

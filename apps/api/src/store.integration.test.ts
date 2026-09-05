@@ -246,9 +246,10 @@ describe.skipIf(!databaseUrl)("GameStore integrity", () => {
     const session = await store!.getSession(created.token);
     expect(session).not.toBeNull();
 
-    await store!.deleteIdentity(session!);
+    const result = await store!.deleteIdentity(session!);
 
     expect(await store!.getSession(created.token)).toBeNull();
+    expect(result.accountIds).toEqual([accountId]);
     const [counts] = await connection!.sql<
       { accounts: number; matches: number; samples: number }[]
     >`
@@ -258,6 +259,58 @@ describe.skipIf(!databaseUrl)("GameStore integrity", () => {
         (select count(*)::integer from location_samples where match_id=${matchId}) as samples
     `;
     expect(counts).toEqual({ accounts: 0, matches: 0, samples: 0 });
+  });
+
+  it("marks demo sessions from their authenticated token after a restart", async () => {
+    const account = await store!.createWebAccount("Demo Host");
+    const created = await store!.createSession({
+      kind: "WEB",
+      accountId: account.id,
+      days: 1,
+      demo: true,
+    });
+
+    expect(created.token.startsWith("demo_")).toBe(true);
+    await expect(store!.getSession(created.token)).resolves.toEqual(
+      expect.objectContaining({ isDemo: true, accountId: account.id }),
+    );
+  });
+
+  it("removes a deleted guest and every event row tied to it", async () => {
+    const { matchId, inviteCode } = await seedInvite();
+    const guest = await store!.joinGuestSession(
+      inviteCode,
+      "Disposable trail",
+      1,
+    );
+    await connection!.sql`
+      insert into game_events (match_id, type, actor_participant_id, point, payload)
+      values (${matchId}, 'BOUNDARY_WARNING', ${guest.participantId},
+        ST_SetSRID(ST_MakePoint(0.5, 0.5), 4326)::geography,
+        '{"private":"participant-linked"}'::jsonb)
+    `;
+    const session = await store!.getSession(guest.token);
+
+    const result = await store!.deleteIdentity(session!);
+
+    expect(result).toEqual({
+      accountIds: [],
+      matchIds: [],
+      participantIds: [guest.participantId],
+    });
+    expect(await store!.getSession(guest.token)).toBeNull();
+    const [counts] = await connection!.sql<
+      { participants: number; events: number; matches: number }[]
+    >`
+      select
+        (select count(*)::integer from participants where id=${guest.participantId}) as participants,
+        (select count(*)::integer from game_events
+          where actor_participant_id=${guest.participantId}
+             or target_participant_id=${guest.participantId}
+             or payload->>'private'='participant-linked') as events,
+        (select count(*)::integer from matches where id=${matchId}) as matches
+    `;
+    expect(counts).toEqual({ participants: 0, events: 0, matches: 1 });
   });
 
   it("joins a new guest and replaces the old guest in one store operation", async () => {

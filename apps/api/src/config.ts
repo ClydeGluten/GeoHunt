@@ -24,6 +24,10 @@ const ConfigSchema = z.object({
     .string()
     .default("false")
     .transform((value) => value === "true"),
+  DEMO_MODE: z
+    .string()
+    .default("false")
+    .transform((value) => value === "true"),
   COOKIE_SECURE: z
     .string()
     .default("true")

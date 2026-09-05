@@ -20,5 +20,17 @@ describe("production configuration", () => {
     });
 
     expect(config.SESSION_DAYS).toBe(30);
+    expect(config.DEMO_MODE).toBe(false);
+  });
+
+  it("only enables the judge demo when explicitly requested", () => {
+    const config = loadConfig({
+      NODE_ENV: "development",
+      DATABASE_URL: "postgres://user:***@localhost/geohunter",
+      REDIS_URL: "redis://localhost:6379",
+      DEMO_MODE: "true",
+    });
+
+    expect(config.DEMO_MODE).toBe(true);
   });
 });

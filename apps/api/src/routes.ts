@@ -14,6 +14,7 @@ import type { ZodTypeProvider } from "fastify-type-provider-zod";
 import type { Redis } from "ioredis";
 import { z, ZodError } from "zod";
 import type { ApiConfig } from "./config.js";
+import type { DemoMatchCoordinator } from "./demo.js";
 import {
   validateTelegramInitData,
   verifyTelegramChatProof,
@@ -82,11 +83,17 @@ function validationIssues(error: unknown): unknown[] | null {
   return null;
 }
 
-export async function purgeRevealedLocations(
+export async function purgePlayerRuntimeData(
   redis: Redis,
   scope: DeletionScope,
 ): Promise<void> {
-  if (scope.matchIds.length === 0 && scope.participantIds.length === 0) return;
+  if (
+    scope.accountIds.length === 0 &&
+    scope.matchIds.length === 0 &&
+    scope.participantIds.length === 0
+  )
+    return;
+  const accountIds = new Set(scope.accountIds);
   const matchIds = new Set(scope.matchIds);
   const participantIds = new Set(scope.participantIds);
   let cursor = "0";
@@ -94,21 +101,61 @@ export async function purgeRevealedLocations(
     const [nextCursor, keys] = await redis.scan(
       cursor,
       "MATCH",
-      "revealed:*",
+      "*",
       "COUNT",
       100,
     );
     cursor = nextCursor;
     for (const key of keys) {
-      const [, matchId, viewerId] = key.split(":");
+      const segments = key.split(":");
+      const namespace = segments[0];
+      const isRealtimeRate =
+        namespace === "rate" &&
+        (segments[1] === "location" ||
+          segments[1] === "location-status" ||
+          segments[1] === "presence" ||
+          segments[1] === "tag");
+      const matchIndex = isRealtimeRate ? 2 : 1;
+      const matchId = segments[matchIndex];
+      const relatedParticipantIds = segments.slice(matchIndex + 1);
+      const knownRuntimeNamespace =
+        namespace === "presence" ||
+        namespace === "revealed" ||
+        namespace === "inaccurate" ||
+        namespace === "autotag" ||
+        namespace === "tagcooldown" ||
+        isRealtimeRate;
+
+      if (knownRuntimeNamespace && matchId && matchIds.has(matchId)) {
+        await redis.del(key);
+        continue;
+      }
+      if (namespace === "presence" && scope.participantIds.length > 0) {
+        await redis.srem(key, ...scope.participantIds);
+        continue;
+      }
+      if (namespace === "revealed") {
+        const viewerId = relatedParticipantIds[0];
+        if (viewerId && participantIds.has(viewerId)) await redis.del(key);
+        else if (scope.participantIds.length > 0)
+          await redis.hdel(key, ...scope.participantIds);
+        continue;
+      }
       if (
-        (matchId && matchIds.has(matchId)) ||
-        (viewerId && participantIds.has(viewerId))
+        knownRuntimeNamespace &&
+        relatedParticipantIds.some((id) => participantIds.has(id))
       ) {
         await redis.del(key);
-      } else if (scope.participantIds.length > 0) {
-        await redis.hdel(key, ...scope.participantIds);
+        continue;
       }
+      if (
+        namespace === "rate" &&
+        segments[1] === "http" &&
+        segments.some(
+          (segment) => accountIds.has(segment) || participantIds.has(segment),
+        )
+      )
+        await redis.del(key);
     }
   } while (cursor !== "0");
 }
@@ -154,9 +201,14 @@ function setSessionCookie(
 
 export async function registerRoutes(
   app: FastifyInstance,
-  dependencies: { store: GameStore; redis: Redis; config: ApiConfig },
+  dependencies: {
+    store: GameStore;
+    redis: Redis;
+    config: ApiConfig;
+    demo?: Pick<DemoMatchCoordinator, "start">;
+  },
 ) {
-  const { store, redis, config } = dependencies;
+  const { store, redis, config, demo } = dependencies;
   const api = app.withTypeProvider<ZodTypeProvider>();
   const previousSession = (request: FastifyRequest) => {
     const token = request.cookies[config.SESSION_COOKIE_NAME];
@@ -164,6 +216,30 @@ export async function registerRoutes(
       ? { id: request.session.id, token }
       : undefined;
   };
+
+  app.addHook("preHandler", async (request) => {
+    if (!request.session?.isDemo) return;
+    const path = request.url.split("?", 1)[0]?.replace(/^\/api/, "") ?? "";
+    if (
+      (request.method === "POST" && path === "/v1/demo/session") ||
+      (request.method === "POST" && path === "/v1/auth/logout") ||
+      (request.method === "GET" && path === "/v1/auth/me")
+    )
+      return;
+
+    const matchRoute = path.match(
+      /^\/v1\/matches\/([0-9a-f-]{36})(?:\/(replay|export))?$/,
+    );
+    if (
+      matchRoute?.[1] &&
+      request.method === "GET" &&
+      request.session.accountId
+    ) {
+      await store.assertHost(matchRoute[1], request.session.accountId);
+      return;
+    }
+    throw new ApiError(403, "Demo session is limited to its demo match");
+  });
 
   api.setErrorHandler((error, request, reply) => {
     const issues = validationIssues(error);
@@ -251,6 +327,15 @@ export async function registerRoutes(
     },
   );
 
+  api.post("/v1/demo/session", async (request, reply) => {
+    if (!config.DEMO_MODE || !demo) throw new ApiError(404, "Not found");
+    await enforceRateLimit(redis, `rate:http:demo:${request.ip}`, 10, 60);
+    const session = await demo.start();
+    setSessionCookie(reply, config, session.token, session.expiresAt);
+    reply.header("cache-control", "no-store");
+    return { matchId: session.matchId };
+  });
+
   api.post(
     "/v1/auth/web",
     { schema: { body: WebAuthSchema, tags: ["auth"] } },
@@ -298,7 +383,7 @@ export async function registerRoutes(
     { schema: { tags: ["auth"] } },
     async (request, reply) => {
       const token = request.cookies[config.SESSION_COOKIE_NAME];
-      if (token) await store.revokeSession(token);
+      if (token && !request.session?.isDemo) await store.revokeSession(token);
       reply.clearCookie(config.SESSION_COOKIE_NAME, { path: "/" });
       return reply.code(204).send();
     },
@@ -310,7 +395,7 @@ export async function registerRoutes(
     async (request, reply) => {
       const session = requireSession(request);
       const scope = await store.deleteIdentity(session);
-      await purgeRevealedLocations(redis, scope);
+      await purgePlayerRuntimeData(redis, scope);
       reply.clearCookie(config.SESSION_COOKIE_NAME, { path: "/" });
       return reply.code(204).send();
     },
@@ -608,7 +693,8 @@ export async function registerRoutes(
       const { id } = IdParameters.parse(request.params);
       await store.assertHost(id, session.accountId);
       await store.deleteMatch(id);
-      await purgeRevealedLocations(redis, {
+      await purgePlayerRuntimeData(redis, {
+        accountIds: [],
         matchIds: [id],
         participantIds: [],
       });

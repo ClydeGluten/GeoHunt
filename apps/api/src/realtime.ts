@@ -674,9 +674,10 @@ export function setupRealtime(
     try {
       const changed = await store.advanceTimers();
       for (const item of changed) {
+        const runtime = await store.getRuntime(item.matchId);
         io.to(`match:${item.matchId}`).emit("phase:changed", {
           state: item.state,
-          phaseEndsAt: null,
+          phaseEndsAt: runtime?.match.phaseEndsAt?.toISOString() ?? null,
         });
         if (item.state === "FINISHED")
           io.to(`match:${item.matchId}`).emit("match:finished", {

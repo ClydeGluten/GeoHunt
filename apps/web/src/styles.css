@@ -616,6 +616,41 @@ input[type="range"] {
 .game-hud > * {
   pointer-events: auto;
 }
+.demo-banner {
+  position: absolute;
+  z-index: 4;
+  top: max(74px, calc(env(safe-area-inset-top) + 62px));
+  left: 50%;
+  width: min(520px, calc(100% - 28px));
+  transform: translateX(-50%);
+  padding: 14px 42px 14px 16px;
+  border: 1px solid rgba(94, 247, 178, 0.28);
+  border-radius: 16px;
+  color: #e6fff4;
+  background: rgba(6, 24, 18, 0.93);
+  box-shadow: 0 16px 40px rgba(0, 0, 0, 0.38);
+  backdrop-filter: blur(12px);
+}
+.demo-banner strong {
+  display: block;
+  margin-bottom: 5px;
+  color: #74f5bc;
+}
+.demo-banner p {
+  margin: 0;
+  font-size: 13px;
+  line-height: 1.45;
+}
+.demo-banner-close {
+  position: absolute;
+  top: 7px;
+  right: 9px;
+  border: 0;
+  color: #c9d9d3;
+  background: transparent;
+  font-size: 22px;
+  cursor: pointer;
+}
 .match-pill {
   justify-self: center;
   min-width: 120px;

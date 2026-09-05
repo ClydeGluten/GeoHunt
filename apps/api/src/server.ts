@@ -12,6 +12,7 @@ import {
 } from "fastify-type-provider-zod";
 import { Redis } from "ioredis";
 import { loadConfig, type ApiConfig } from "./config.js";
+import { DemoMatchCoordinator, SocketIoDemoTransport } from "./demo.js";
 import { setupRealtime } from "./realtime.js";
 import { registerRoutes } from "./routes.js";
 import { GameStore } from "./store.js";
@@ -29,6 +30,18 @@ export async function buildServer(config: ApiConfig = loadConfig()) {
     trustProxy: true,
     bodyLimit: 128 * 1024,
   });
+  const demo = config.DEMO_MODE
+    ? new DemoMatchCoordinator(
+        store,
+        new SocketIoDemoTransport(
+          `http://127.0.0.1:${config.PORT}`,
+          config.SESSION_COOKIE_NAME,
+        ),
+        undefined,
+        undefined,
+        (error) => app.log.error(error, "Demo simulation stopped"),
+      )
+    : null;
   redis.on("error", (error) =>
     app.log.error({ err: error }, "Redis command connection failed"),
   );
@@ -78,7 +91,13 @@ export async function buildServer(config: ApiConfig = loadConfig()) {
   });
 
   await app.register(
-    async (api) => registerRoutes(api, { store, redis, config }),
+    async (api) =>
+      registerRoutes(api, {
+        store,
+        redis,
+        config,
+        ...(demo ? { demo } : {}),
+      }),
     { prefix: "/api" },
   );
   const realtime = setupRealtime(app.server, {

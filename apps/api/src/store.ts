@@ -30,9 +30,11 @@ export interface SessionContext {
   accountId: string | null;
   participantId: string | null;
   expiresAt: Date;
+  isDemo?: boolean;
 }
 
 export interface DeletionScope {
+  accountIds: string[];
   matchIds: string[];
   participantIds: string[];
 }
@@ -152,6 +154,11 @@ function jsonPayload(value: unknown): string {
   return payload;
 }
 
+function databaseDate(value: unknown): Date | null {
+  if (value == null) return null;
+  return value instanceof Date ? value : new Date(String(value));
+}
+
 export class GameStore {
   constructor(private readonly connection: DatabaseConnection) {}
 
@@ -213,7 +220,11 @@ export class GameStore {
 
   async deleteIdentity(session: SessionContext): Promise<DeletionScope> {
     return this.connection.sql.begin(async (transaction) => {
-      const empty: DeletionScope = { matchIds: [], participantIds: [] };
+      const empty: DeletionScope = {
+        accountIds: [],
+        matchIds: [],
+        participantIds: [],
+      };
       const [current] = await transaction`
         select id from auth_sessions where id=${session.id} for update
       `;
@@ -235,6 +246,11 @@ export class GameStore {
           await transaction`select id from matches where id=${match.id} for update`;
         }
         await transaction`delete from matches where host_account_id=${session.accountId}`;
+        await transaction`
+          delete from game_events e using participants p
+          where p.account_id=${session.accountId}
+            and (e.actor_participant_id=p.id or e.target_participant_id=p.id)
+        `;
         const removed = await transaction<{ matchId: string }[]>`
           delete from participants where account_id=${session.accountId}
           returning match_id as "matchId"
@@ -249,6 +265,7 @@ export class GameStore {
         }
         await transaction`delete from accounts where id=${session.accountId}`;
         return {
+          accountIds: [session.accountId],
           matchIds: matches
             .filter((match) => match.hosted)
             .map((match) => match.id),
@@ -263,12 +280,21 @@ export class GameStore {
         `;
         if (participant) {
           await transaction`select id from matches where id=${participant.matchId} for update`;
+          await transaction`
+            delete from game_events
+            where actor_participant_id=${session.participantId}
+               or target_participant_id=${session.participantId}
+          `;
           await transaction`delete from participants where id=${session.participantId}`;
           await finishIfNoActiveHiders(transaction, participant.matchId);
         } else {
           await transaction`delete from auth_sessions where id=${session.id}`;
         }
-        return { matchIds: [], participantIds: [session.participantId] };
+        return {
+          accountIds: [],
+          matchIds: [],
+          participantIds: [session.participantId],
+        };
       }
 
       return empty;
@@ -281,10 +307,11 @@ export class GameStore {
       accountId?: string;
       participantId?: string;
       days: number;
+      demo?: boolean;
     },
     previous?: { id: string; token: string },
   ) {
-    const token = newOpaqueToken();
+    const token = `${input.demo ? "demo_" : ""}${newOpaqueToken()}`;
     const expiresAt = new Date(Date.now() + input.days * 86_400_000);
     await this.connection.sql.begin(async (transaction) => {
       if (previous) {
@@ -335,7 +362,7 @@ export class GameStore {
       where token_hash = ${hashToken(token)} and expires_at > now()
       returning id, kind, account_id as "accountId", participant_id as "participantId", expires_at as "expiresAt"
     `;
-    return session ?? null;
+    return session ? { ...session, isDemo: token.startsWith("demo_") } : null;
   }
 
   async revokeSession(token: string): Promise<void> {
@@ -789,10 +816,10 @@ export class GameStore {
         state: row.state as MatchState,
         stateBeforePause: row.stateBeforePause as MatchState | null,
         winnerRole: row.winnerRole as "HIDER" | "SEEKER" | null,
-        phaseStartedAt: row.phaseStartedAt as Date | null,
-        phaseEndsAt: row.phaseEndsAt as Date | null,
-        activeStartedAt: row.activeStartedAt as Date | null,
-        pausedAt: row.pausedAt as Date | null,
+        phaseStartedAt: databaseDate(row.phaseStartedAt),
+        phaseEndsAt: databaseDate(row.phaseEndsAt),
+        activeStartedAt: databaseDate(row.activeStartedAt),
+        pausedAt: databaseDate(row.pausedAt),
         pausedDurationMs: Number(row.pausedDurationMs),
         emergencyReveal: Boolean(row.emergencyReveal),
       },

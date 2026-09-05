@@ -11,6 +11,7 @@ import { io, type Socket } from "socket.io-client";
 import QRCode from "qrcode";
 import { useEffect, useRef, useState } from "react";
 import { api, post, put } from "../api";
+import { DemoBanner } from "../DemoBanner";
 import { MapView } from "../MapView";
 import {
   hapticError,
@@ -25,10 +26,12 @@ type TrackingState = "ASKING" | "LIVE" | "POOR" | "DENIED" | "OFF";
 
 export function GameScreen({
   matchId,
+  demo = false,
   onBack,
   onReplay,
 }: {
   matchId: string;
+  demo?: boolean;
   onBack: () => void;
   onReplay: () => void;
 }) {
@@ -47,6 +50,7 @@ export function GameScreen({
     qr: string;
   } | null>(null);
   const [message, setMessage] = useState<string | null>(null);
+  const [showDemoBanner, setShowDemoBanner] = useState(true);
   const [now, setNow] = useState(Date.now());
   const socketRef = useRef<GameSocket | null>(null);
   const sequence = useRef(Date.now());
@@ -349,8 +353,8 @@ export function GameScreen({
     if (
       !confirm(
         host
-          ? "Delete your identity and every match it hosts? This permanently removes all match routes and replays."
-          : "Delete your identity and location history from GeoHunt? This cannot be undone.",
+          ? "Permanently delete your identity, nickname, sessions, location history, replay data, and every match it hosts? You will leave this active match. This cannot be undone."
+          : "Permanently delete your identity, nickname, sessions, location history, and replay data? You will leave this active match. This cannot be undone.",
       )
     )
       return;
@@ -386,7 +390,7 @@ export function GameScreen({
         </button>
       </main>
     );
-  const host = snapshot.viewerIsHost;
+  const host = (snapshot?.viewerIsHost ?? false) && !demo;
   const displayedViewerRole =
     snapshot.viewerRole === "HOST" ? "SPECTATOR" : snapshot.viewerRole;
   const secondsLeft = phaseSecondsLeft(
@@ -404,6 +408,9 @@ export function GameScreen({
           positions={snapshot.visiblePositions}
         />
       </div>
+      {demo && showDemoBanner && (
+        <DemoBanner onDismiss={() => setShowDemoBanner(false)} />
+      )}
       <header className="game-hud">
         <button className="round-button" onClick={onBack}>
           ←
@@ -479,7 +486,7 @@ export function GameScreen({
               ))}
           </div>
         )}
-        {host && (
+        {(host || (demo && snapshot.state === "FINISHED")) && (
           <HostControls
             state={snapshot.state}
             emergency={snapshot.emergencyReveal}
@@ -493,6 +500,7 @@ export function GameScreen({
         <PlayerPanel
           snapshot={snapshot}
           host={host}
+          canDeleteData={!demo}
           onClose={() => setPanel(null)}
           onDeleteData={() => void deleteMyData()}
           onAssign={(id, role) => void assignRole(id, role)}
@@ -593,6 +601,7 @@ function HostControls({
 function PlayerPanel({
   snapshot,
   host,
+  canDeleteData,
   onClose,
   onDeleteData,
   onAssign,
@@ -601,6 +610,7 @@ function PlayerPanel({
 }: {
   snapshot: MatchSnapshot;
   host: boolean;
+  canDeleteData: boolean;
   onClose: () => void;
   onDeleteData: () => void;
   onAssign: (id: string, role: PlayerRole) => void;
@@ -695,15 +705,17 @@ function PlayerPanel({
             );
           })}
         </div>
-        <div className="drawer-privacy">
-          <p>
-            Permanently remove your identity and recorded location data from
-            this deployment.
-          </p>
-          <button className="danger" onClick={onDeleteData}>
-            Delete my data
-          </button>
-        </div>
+        {canDeleteData && (
+          <div className="drawer-privacy">
+            <p>
+              Permanently remove your identity, nickname, sessions, location and
+              replay data from this deployment. You will leave the active match.
+            </p>
+            <button className="danger" onClick={onDeleteData}>
+              Delete my data
+            </button>
+          </div>
+        )}
       </section>
     </div>
   );

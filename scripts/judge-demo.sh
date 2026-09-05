@@ -3,11 +3,15 @@ set -Eeuo pipefail
 
 repo_dir="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)"
 env_file="$repo_dir/.env.judge"
+docker_repo_dir="$repo_dir"
+if command -v cygpath >/dev/null 2>&1; then
+  docker_repo_dir="$(cygpath -m "$repo_dir")"
+fi
 compose=(
   docker compose
-  --env-file "$env_file"
-  --project-directory "$repo_dir"
-  --file "$repo_dir/compose.yaml"
+  --env-file "$docker_repo_dir/.env.judge"
+  --project-directory "$docker_repo_dir"
+  --file "$docker_repo_dir/compose.yaml"
 )
 
 write_env() {
@@ -90,6 +94,15 @@ start() {
 
 case "${1:-start}" in
   start) start ;;
+  demo)
+    export DEMO_MODE=true
+    start
+    web_port=8080
+    while IFS='=' read -r key value; do
+      [[ "$key" == "WEB_PORT" ]] && web_port="$value"
+    done <"$env_file"
+    printf 'Open the live deterministic match: http://localhost:%s/?demo=1\n' "$web_port"
+    ;;
   stop) "${compose[@]}" down ;;
   reset)
     "${compose[@]}" down --volumes --remove-orphans
@@ -98,7 +111,7 @@ case "${1:-start}" in
   logs) "${compose[@]}" logs --follow app ;;
   status) "${compose[@]}" ps ;;
   *)
-    printf 'Usage: %s [start|stop|reset|logs|status]\n' "$0" >&2
+    printf 'Usage: %s [start|demo|stop|reset|logs|status]\n' "$0" >&2
     exit 2
     ;;
 esac
