@@ -1,8 +1,11 @@
-import { createHash } from "node:crypto";
 import { readdir, readFile } from "node:fs/promises";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import postgres from "postgres";
+import {
+  canonicalMigrationChecksum,
+  matchesMigrationChecksum,
+} from "./migration-checksum.js";
 
 const databaseUrl = process.env.DATABASE_URL;
 if (!databaseUrl) throw new Error("DATABASE_URL is required");
@@ -32,12 +35,12 @@ try {
     .sort();
   for (const file of files) {
     const source = await readFile(join(directory, file), "utf8");
-    const checksum = createHash("sha256").update(source).digest("hex");
+    const checksum = canonicalMigrationChecksum(source);
     const [existing] = await sql<
       { checksum: string }[]
     >`select checksum from _schema_migrations where name = ${file}`;
     if (existing) {
-      if (existing.checksum !== checksum)
+      if (!matchesMigrationChecksum(source, existing.checksum))
         throw new Error(`Applied migration changed: ${file}`);
       continue;
     }
