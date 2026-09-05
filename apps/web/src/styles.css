@@ -885,8 +885,19 @@ input[type="range"] {
 .replay-controls input {
   margin: 18px 0;
 }
+.replay-actions {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 10px;
+}
 .replay-play {
   width: 100%;
+}
+.replay-export {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  text-decoration: none;
 }
 
 @media (min-width: 760px) {

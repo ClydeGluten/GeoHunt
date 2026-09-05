@@ -70,6 +70,9 @@ test("host, seeker, hider, match finish, and published replay", async ({
   await hostPage.getByRole("button", { name: "End" }).click();
   await hostPage.getByRole("button", { name: "View replay" }).click();
   await expect(hostPage.getByText("FULL REPLAY")).toBeVisible();
+  await expect(
+    hostPage.getByRole("link", { name: "Export replay" }),
+  ).toBeVisible();
   await hostPage.getByRole("button", { name: "Publish replay" }).click();
 
   await guests[0]!.page.goto(

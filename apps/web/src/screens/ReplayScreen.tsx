@@ -7,6 +7,7 @@ import { useEffect, useMemo, useState } from "react";
 import { api, put } from "../api";
 import { MapView } from "../MapView";
 import type { ReplayData } from "../types";
+import { ReplayExportLink } from "./ReplayExportLink";
 
 export function ReplayScreen({
   matchId,
@@ -160,16 +161,19 @@ export function ReplayScreen({
           value={cursor}
           onChange={(event) => setCursor(Number(event.target.value))}
         />
-        <button
-          className="primary replay-play"
-          disabled={!times.length}
-          onClick={() => {
-            if (cursor >= times.length - 1) setCursor(0);
-            setPlaying(!playing);
-          }}
-        >
-          {playing ? "Pause" : "Play replay"}
-        </button>
+        <div className="replay-actions">
+          <button
+            className="primary replay-play"
+            disabled={!times.length}
+            onClick={() => {
+              if (cursor >= times.length - 1) setCursor(0);
+              setPlaying(!playing);
+            }}
+          >
+            {playing ? "Pause" : "Play replay"}
+          </button>
+          {snapshot.viewerIsHost && <ReplayExportLink matchId={matchId} />}
+        </div>
         {replay.truncated && (
           <p className="warning-note">
             This replay reached the 10,000-item safety limit. The remaining
