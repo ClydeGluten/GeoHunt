@@ -6,9 +6,12 @@
 ./scripts/judge-demo.sh
 ```
 
-The launcher creates a mode-`0600` `.env.judge` with random local secrets, builds the all-in-one image, starts it, and waits for `http://127.0.0.1:8080/api/ready`. It sets `BOT_MODE=disabled`, so no Telegram credential is needed.
+The no-argument launcher creates a mode-`0600` `.env.judge` with random local secrets, builds the all-in-one image, enables the deterministic match, and waits for `http://127.0.0.1:8080/api/ready`. Open the printed `?demo=1` URL to start watching one seeker and two hiders move automatically. It sets `BOT_MODE=disabled`, so no Telegram credential is needed.
+
+Use `./scripts/judge-demo.sh start` when you specifically want the normal manual create/join flow instead of the automated judge match.
 
 ```bash
+./scripts/judge-demo.sh start   # normal manual game flow
 ./scripts/judge-demo.sh status
 ./scripts/judge-demo.sh logs
 ./scripts/judge-demo.sh stop   # preserve volumes

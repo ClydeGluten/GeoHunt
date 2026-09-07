@@ -77,11 +77,13 @@ start() {
     [[ "$key" == "WEB_PORT" ]] && web_port="$value"
   done <"$env_file"
   "${compose[@]}" config -q
-  "${compose[@]}" up --build --detach
+  "${compose[@]}" up --build --detach "$@"
   for _ in $(seq 1 90); do
     if curl --fail --silent "http://127.0.0.1:$web_port/api/ready" >/dev/null; then
-      printf '\nGeoHunt judge demo is ready: http://localhost:%s\n' "$web_port"
-      printf 'Use any 2-40 character trail name; Telegram is not required.\n'
+      if [[ "${DEMO_MODE:-false}" != "true" ]]; then
+        printf '\nGeoHunt is ready: http://localhost:%s\n' "$web_port"
+        printf 'Use any 2-40 character trail name; Telegram is not required.\n'
+      fi
       return
     fi
     sleep 2
@@ -92,11 +94,14 @@ start() {
   exit 1
 }
 
-case "${1:-start}" in
-  start) start ;;
+case "${1:-demo}" in
+  start)
+    export DEMO_MODE=false
+    start
+    ;;
   demo)
     export DEMO_MODE=true
-    start
+    start --force-recreate
     web_port=8080
     while IFS='=' read -r key value; do
       [[ "$key" == "WEB_PORT" ]] && web_port="$value"
@@ -111,7 +116,7 @@ case "${1:-start}" in
   logs) "${compose[@]}" logs --follow app ;;
   status) "${compose[@]}" ps ;;
   *)
-    printf 'Usage: %s [start|demo|stop|reset|logs|status]\n' "$0" >&2
+    printf 'Usage: %s [demo|start|stop|reset|logs|status]\n' "$0" >&2
     exit 2
     ;;
 esac

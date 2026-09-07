@@ -23,19 +23,9 @@ Players draw a real-world arena, split into hiders and seekers, and play against
 ./scripts/judge-demo.sh
 ```
 
-Open **http://localhost:8080**, choose any trail name, then select **Create a hunt**. The script builds the all-in-one image, generates disposable local secrets, runs migrations, and waits for the readiness probe. Telegram credentials are not required for this path.
+Open the printed `?demo=1` URL. The no-argument launcher builds the all-in-one image, generates disposable local secrets, runs migrations, enables the deterministic demo, and waits for readiness. One seeker and two hiders then move automatically through the production Socket.IO location pipeline. Watch the live phase timer, visibility updates, and player movement. The match finishes automatically in about 65 seconds; then select **View replay** to inspect the recorded routes or **Export replay** to download its JSON. Telegram credentials are not required.
 
-### Do this, then watch this
-
-To skip setup and immediately watch a complete deterministic match:
-
-```bash
-./scripts/judge-demo.sh demo
-```
-
-Open the printed `?demo=1` URL. One seeker and two hiders move along predetermined routes through the production Socket.IO location pipeline. Watch the live phase timer, visibility updates, and player movement. The match finishes automatically in about 65 seconds; then select **View replay** to inspect the recorded routes or use **Export replay** to download its JSON.
-
-The demo endpoint exists only while `DEMO_MODE=true`; the regular launcher keeps it disabled.
+For the normal manual game flow instead, run `./scripts/judge-demo.sh start`, open the printed root URL, choose a trail name, and select **Create a hunt**. The explicit `demo` subcommand is retained as an alias for the default behavior; only `start` keeps the demo endpoint disabled.
 
 ```bash
 ./scripts/judge-demo.sh status  # inspect the container

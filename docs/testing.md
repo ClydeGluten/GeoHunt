@@ -15,7 +15,7 @@ GeoHunt uses layered checks because pure game rules, database transactions, real
 | `pnpm test:e2e`                                         | Playwright core lifecycle and multi-client scenarios against a running stack                                                               |
 | `pnpm test:load`                                        | Socket.IO clients sending locations, reconnecting, and exercising reveal churn against disposable data                                     |
 | `docker compose --env-file .env.example config --quiet` | Compose interpolation and deployment-definition validation                                                                                 |
-| `bash -n scripts/judge-demo.sh`                         | Judge-launcher shell syntax                                                                                                                |
+| `pnpm test:judge`                                       | Judge launcher defaults to the automated demo and prints its direct URL                                                                    |
 
 `apps/api/src/store.integration.test.ts` runs as part of `pnpm test` when `TEST_DATABASE_URL` is defined and skips cleanly when it is not. The GitHub Actions workflow provisions PostgreSQL/PostGIS, migrates it, and supplies that variable, so the transaction suite cannot silently disappear in CI.
 
@@ -54,9 +54,18 @@ The example credential is only for a disposable local test service.
 ## Judge container smoke test
 
 ```bash
+pnpm test:judge
 ./scripts/judge-demo.sh
 curl --fail http://127.0.0.1:8080/api/ready
 ./scripts/judge-demo.sh status
+```
+
+Open the printed `?demo=1` URL and verify that the demo creates one host, two hiders, and one seeker; advances from hiding to active play; displays changing positions; finishes automatically; and produces a replay.
+
+For the full manual lifecycle, first switch the same stack to normal mode:
+
+```bash
+./scripts/judge-demo.sh start
 ```
 
 Then verify in the browser:

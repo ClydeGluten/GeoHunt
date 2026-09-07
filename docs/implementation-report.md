@@ -182,15 +182,15 @@ Agent-assisted implementation was evaluated through source review, tests, fresh-
 ## Judge walkthrough
 
 1. Run `./scripts/judge-demo.sh`.
-2. Open `http://localhost:8080` and enter a browser trail name.
-3. Create a hunt and draw at least three map corners.
-4. Review the rule surface and both host disclosures.
-5. Open the generated invite in a private browser profile to exercise guest consent and identity isolation.
-6. Assign one hider and one seeker, then start.
-7. Compare the two clients: their snapshots and controls differ by role.
-8. Finish the game and open the replay.
-9. Inspect `/api/docs`, then compare the behavior with the source links above.
-10. Run `./scripts/judge-demo.sh reset` when finished.
+2. Open the printed `?demo=1` URL; no login or manual match setup is required.
+3. Watch the host, two hiders, and one seeker advance from hiding into active play.
+4. Observe the predetermined routes, visibility updates, and automatic game actions driven through the real realtime pipeline.
+5. Wait for the match to finish automatically in about 65 seconds.
+6. Open the replay and export its JSON.
+7. Inspect `/api/docs`, then compare the behavior with the source links above.
+8. Run `./scripts/judge-demo.sh reset` when finished.
+
+Run `./scripts/judge-demo.sh start` instead when evaluating the normal manual create, invite, consent, role-assignment, and multi-client flow.
 
 ## Verification record
 
